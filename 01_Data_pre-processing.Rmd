@@ -1,0 +1,2450 @@
+---
+title: > 
+      Using single-cell chromatin accessibility sequencing to characterize CD4+ T cells from murine tissues
+author: > 
+  Kathrin Luise Braband, Annekathrin Silvia Nedwed, Sara Salome Helbich, Malte Simon, Niklas Beumer, Benedikt Brors, Federico Marini and Michael Delacher
+email: > 
+  delacher@uni-mainz.de, marinif@uni-mainz.de
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: yes
+    number_sections: yes
+  html_document:
+    toc: yes
+    toc_float: yes
+    code_folding: show
+    number_sections: yes
+    theme: lumen
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, include=FALSE}
+library(ArchR)
+library(tidyverse)
+library(dplyr)
+library(pheatmap)
+library(cowplot)
+library(magick)
+library(pdftools)
+library(ggplot2)
+library(viridis)
+library(ggpointdensity)
+```
+
+```{r setInitialParameters}
+# Set seeds and initial parameters for ArchR
+RNGkind("L'Ecuyer-CMRG")
+set.seed(1)
+
+# Number of cores to use (adapt to your machine, but has to be > 1 otherwise plotTSSenrichment does not work properly)
+addArchRThreads(threads = 8)
+
+# Reference genome (adapt to your data, use the same reference that was used for the alignment)
+addArchRGenome("mm10")
+```
+
+# Samples
+We are analyzing CD4+ T cells from healthy murine tissue (spleen, colon, fat and skin). For spleen we have an additional sample of CD25+ regulatory T cells. Overall we have 5 samples in this analysis, which were previously aligned using Cell Ranger ATAC (v2.0.0) count. <br>
+<br>
+scATAC_1    spleen    CD4+ T cells <br>
+scATAC_8    spleen    CD25+ T cells <br>
+scATAC_4    colon     CD4+ T cells <br>
+scATAC_5    fat       CD4+ T cells <br>
+scATAC_9    skin      CD4+ T cells <br>
+
+# Create ArrowFiles
+From the fragments.tsv files output by Cell Ranger ATAC count, generate ArrowFiles for subsequent analysis with ArchR. 
+
+```{r create arrow files, warning=FALSE, message=FALSE, eval=FALSE}
+# Read in fragments files
+samples = paste0("MD_scATAC_", c(1,4,5,8,9))
+inputFiles = file.path("data", samples, "fragments.tsv.gz")
+names(inputFiles) = paste0("scATAC_", c(1,4,5,8,9))
+
+# Create arrow files
+# Evaluate different thresholds depending on your data: 
+# - minTSS:   Start with 0 to see all cells, afterwards evaluate which threshold 
+#             works for all of the samples
+# - minFrags: Recommended to set >= 1000, otherwise the analysis might not be
+#             robust enough
+# Check different parameters to set with ?createArrowFiles
+ArrowFiles = createArrowFiles(
+  inputFiles = inputFiles,
+  sampleNames = names(inputFiles),
+  minTSS = 0,
+  minFrags = 1000, 
+  addTileMat = TRUE,
+  addGeneScoreMat = TRUE,
+  force = TRUE 
+  )
+```
+
+After you created the ArrowFiles, check the folder "QualityControl" for each of the samples to evaluate which minTSS threshold to use for the analysis. In this analysis, we decided on minTSS = 10. We will filter the data accordingly later on.  
+
+# Create ArchRProject
+Now combine the individual ArrowFiles into an ArchRProject. 
+
+```{r create ArchRProject, warning=FALSE, message=FALSE, eval=FALSE}
+# Define arrow files
+ArrowFiles = paste0("scATAC_", c(1,4,5,8,9), ".arrow")
+
+# Create ArchRProject
+# It is recommended to set copyArrows = TRUE to maintain an unaltered copy for 
+# later usage. 
+proj = ArchRProject(
+  ArrowFiles = ArrowFiles,
+  copyArrows = TRUE
+)
+
+saveArchRProject(proj, 
+  outputDirectory="ArchRProject", 
+  load=F
+)
+```
+
+```{r load ArchRProject proj, echo=T, results='hide', message=FALSE, include=FALSE}
+# Load ArchRProject
+proj = loadArchRProject(
+  path = "ArchRProject", 
+  force = TRUE, 
+  showLogo = FALSE
+  )
+```
+
+# QC and filtering
+## TSS enrichment vs nFrags (unfiltered)
+```{r filter for cells passing the TSS enrichment cut-off, message=FALSE, warning=FALSE, eval=FALSE}
+# After checking the plots in "QualityControl", we decided to use minTSS = 10. 
+# Now, we filter for all cells with minTSS >= 10. 
+proj = proj[proj@cellColData$TSSEnrichment >= 10, ]
+```
+
+```{r QC plot (TSS Enrichment vs nFrags), message=FALSE, warning=FALSE}
+# As part of the quality control, we plot the TSS enrichment against the number 
+# of fragments. As we only have one project now, we get one plot for all of the 
+# data.
+# We use geom_pointdensity() for plotting, which colours each datapoint 
+# according to the number of neighbours and thus allows for evaluation of the 
+# individual datapoints as well as their distribution
+
+qc_metrics = getCellColData(proj, select = c("log10(nFrags)", "TSSEnrichment"))
+
+p_qc_metrics = ggPoint(
+  x = qc_metrics[,1],
+  y = qc_metrics[,2],
+  colorDensity = FALSE,
+  xlabel = "Log10 Unique Fragments",
+  ylabel = "TSS Enrichment",
+  xlim = c(log10(500), quantile(qc_metrics[,1], probs = 0.99)),
+  ylim = c(0, quantile(qc_metrics[,2], probs = 0.99))) + 
+  geom_hline(yintercept = 10, lty = "dashed") + 
+  geom_vline(xintercept = 3, lty = "dashed") + 
+  geom_pointdensity(size = 0.5) + 
+  scale_color_viridis()
+
+p_qc_metrics
+```
+
+```{r save TSS Enrichment vs nFrags plot, warning=FALSE, message=FALSE, echo=FALSE}
+# Save plot as PDF, will be saved in "ArchRProject/Plots"
+plotPDF(p_qc_metrics, 
+  name = "TSS_Enrichment_vs_nFrags.pdf", 
+  ArchRProj = proj, 
+  addDOC = FALSE, 
+  width = 4, 
+  height = 4
+)
+```
+
+## Plot sample statistics for the ArchRProject
+```{r sample statistics plots, message=FALSE, warning=FALSE}
+# 1. Show TSS enrichment score for each sample in a ridge plot.
+# The TSS enrichment score is a proxy for the quality of the sample and should
+# be similar in all samples in the dataset.
+p1 = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Sample", 
+  colorBy = "cellColData", 
+  name = "TSSEnrichment",
+  plotAs = "ridges"
+)
+p1
+
+# 2. You can also display TSS enrichment scores in a violin plot.
+# Lower and upper hinges correspond to the 25th and 75th percentiles, the middle
+# corresponds to the median. Lower and upper whiskers extend from the hinge to 
+# the lowest or highest value or 1.5 times the IQR.
+p2 = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Sample", 
+  colorBy = "cellColData", 
+  name = "TSSEnrichment",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p2
+
+# 3. Show log10(unique nuclear fragments) for each sample in a ridge plot.
+# It would be ideal if all of the samples have a similar number of fragments 
+# per cell. If this is not the case, you can downsample the files by randomly
+# removing fragments from the larger sample(s) in the fragments.tsv.gz file.
+p3 = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Sample", 
+  colorBy = "cellColData", 
+  name = "log10(nFrags)",
+  plotAs = "ridges"
+)
+p3
+
+# 4. You can also display log10(unique nuclear fragments) in a violin plot.
+p4 = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Sample", 
+  colorBy = "cellColData", 
+  name = "log10(nFrags)",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p4
+```
+
+```{r save sample statistics plots, warning=FALSE, message=FALSE, echo=FALSE}
+# Save plots as PDF
+plotPDF(p1,p2,p3,p4, 
+  name = "QC-Sample-Statistics.pdf", 
+  ArchRProj = proj, 
+  addDOC = FALSE, 
+  width = 4, 
+  height = 4
+)
+```
+
+```{r sample statistics plots2, message=FALSE}
+# 5. plot sample fragment size distributions:
+# Ideally, you should see a nucleosome profile with enrichment in 
+# periodicity of 150 bp (length of DNA wrapped around one nucleosome) 
+p5 = plotFragmentSizes(ArchRProj = proj)
+p5
+
+# 6. plot TSS enrichment profiles:
+p6 = plotTSSEnrichment(ArchRProj = proj)
+p6    
+```
+
+```{r save sample statistics plots2, warning=FALSE, message=FALSE, echo=FALSE}
+# Save plots as PDF
+plotPDF(p5,p6, 
+  name = "QC-Sample-FragSizes-TSSProfile.pdf", 
+  ArchRProj = proj, 
+  addDOC = FALSE, 
+  width = 5, 
+  height = 5
+)
+```
+
+# Dimensionality reduction
+## Compute LSI dimensionality reduction
+```{r dimensionality reduction, message=FALSE, warning=FALSE, eval=FALSE}
+# LSI dimensionality reduction
+# Create a dimensionality reduction of the data as basis for visualisation as UMAP
+proj = addIterativeLSI( 
+  ArchRProj = proj,
+  useMatrix = "TileMatrix", 
+  name = "IterativeLSI", 
+  iterations = 2, 
+  clusterParams = list(
+    resolution = c(0.2), 
+    sampleCells = 10000, 
+    n.start = 10
+  ), 
+  varFeatures = 25000, 
+  dimsToUse = 1:30,
+  force = TRUE
+)
+```
+
+```{r clustering, message=FALSE, warning=FALSE, eval=FALSE}
+# Clustering using the Louvain algorithm
+# The Leiden algorithm can be using instead by passing “algorithm = 4”, which is 
+# an argument of Seurat’s FindClusters() function, to the addClusters() function
+# (requires the leidenalg Python package)
+
+proj = addClusters(
+  input = proj,
+  reducedDims = "IterativeLSI",
+  method = "Seurat",
+  name = "Clusters",
+  resolution = 0.8, 
+  force = TRUE
+)
+```
+
+## Visualization in UMAP embedding
+```{r add UMAP embedding, message=FALSE, eval=FALSE}
+# Visualization of clustering in UMAP embedding.
+# This step is not deterministic, plots will look different to the figures in
+# the manuscript
+proj = addUMAP(
+  ArchRProj = proj, 
+  reducedDims = "IterativeLSI", 
+  name = "UMAP", 
+  nNeighbors = 30, 
+  minDist = 0.5, 
+  metric = "cosine", 
+  force = TRUE
+)
+```
+
+```{r save ArchRProject after adding UMAP, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE, eval=FALSE}
+# Save ArchRProject
+saveArchRProject(proj, 
+  outputDirectory= "ArchRProject", 
+  overwrite = TRUE,  
+  load = FALSE
+)
+```
+
+```{r visualization in UMAP, warning=FALSE, message=FALSE}
+# Color by clusters
+p_clusters = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "cellColData", 
+  name = "Clusters", 
+  embedding = "UMAP", 
+  size = 0.5
+  )
+
+# Color by samples
+p_samples = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "cellColData", 
+  name = "Sample", 
+  embedding = "UMAP", 
+  size = 0.5
+  )
+
+# Plot
+ggAlignPlots(p_clusters, p_samples, type = "h")
+```
+
+```{r save UMAP plots, warning=FALSE, message=FALSE, echo=FALSE}
+# Save as PDF
+plotPDF(p_clusters, p_samples, 
+  name = "UMAP_clusters_samples.pdf", 
+  ArchRProj = proj, 
+  addDOC = FALSE, 
+  width = 5, 
+  height = 5
+  )
+```
+
+## Identifying marker genes
+```{r get marker features, message=FALSE, warning=FALSE}
+# Get marker features
+# Determine marker genes of each cluster based on the gene score matrix. 
+# For this, each cluster is compared to all other clusters using wilcoxon 
+# rank-sum test.
+markersGS = getMarkerFeatures(
+  ArchRProj = proj, 
+  useMatrix = "GeneScoreMatrix", 
+  groupBy = "Clusters",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  testMethod = "wilcoxon"
+)
+```
+
+```{r identifying marker genes grouped by clusters, message = TRUE, warning=FALSE}
+# Define which genes to highlight
+markerGenes = c("Cd4", "Il2ra", "Foxp3", "Batf", "Ccr8", "Ikzf2", "Rorc", "Tbx21", "Ifng", "Gata3", "Klrg1", "Il2")
+
+# Get markers
+markerList = getMarkers(markersGS, cutOff = "FDR <= 0.01 & Log2FC >= 1.25")
+```
+
+```{r overlay per-cell gene scores on UMAP embedding, message=FALSE, warning=FALSE}
+# Overlay per-cell gene scores on our UMAP embedding
+genes = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "GeneScoreMatrix", 
+  name = markerGenes, 
+  embedding = "UMAP",
+  plotAs = "points", 
+  quantCut = c(0.01, 0.95),
+  imputeWeights = NULL,
+  size = 0.5
+)
+
+# To plot all genes we can use cowplot to arrange the various marker genes into
+# a single plot
+genes_cow = lapply(genes, function(x){
+  x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+      axis.text.x=element_blank(), 
+      axis.ticks.x=element_blank(), 
+      axis.text.y=element_blank(), 
+      axis.ticks.y=element_blank()
+    )
+})
+do.call(cowplot::plot_grid, c(list(ncol = 4), genes_cow))
+```
+
+```{r save genescores overlayed on UMAP, warning=FALSE, message=FALSE, echo=FALSE}
+# Save an editable vectorized version of this plot
+plotPDF(plotList = genes, 
+        name = "Plot-UMAP-Marker-Genes_proj.pdf", 
+        ArchRProj = proj, 
+        addDOC = FALSE, width = 5, height = 5)
+```
+
+## Impute marker genes with MAGIC
+```{r impute marker genes with MAGIC, message=FALSE, warning=FALSE}
+# Some of the gene score overlays appear quite variable. This is due to the 
+# sparsity of scATAC-seq data. MAGIC can be used to impute gene scores by 
+# smoothing signal across nearby cells. This greatly improves the visual 
+# interpretation of gene scores.
+
+#Wwe first add impute weights to our ArchRProject
+proj = addImputeWeights(proj)
+
+# These impute weights can then be passed to plotEmbedding() when plotting gene 
+# scores overlayed on the UMAP embedding
+magic_genes = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "GeneScoreMatrix", 
+  name = markerGenes, 
+  embedding = "UMAP",
+  plotAs = "points", 
+  imputeWeights = getImputeWeights(proj),
+  size = 0.5
+)
+
+#Plot all genes in cowplot
+magic_genes_cow = lapply(magic_genes, function(x){
+  x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+      axis.text.x=element_blank(), 
+      axis.ticks.x=element_blank(), 
+      axis.text.y=element_blank(), 
+      axis.ticks.y=element_blank()
+    )
+})
+do.call(cowplot::plot_grid, c(list(ncol = 4), magic_genes_cow))
+```
+
+```{r save magic marker genes, warning=FALSE, message=FALSE, echo=FALSE}
+#Save
+plotPDF(plotList = magic_genes, 
+        name = "Plot-UMAP-MAGIC-Marker-Genes_proj.pdf", 
+        ArchRProj = proj, 
+        addDOC = FALSE, width = 5, height = 5)
+```
+
+## Tweak different parameters of LSI dimensionality reduction
+Now we tweak different parameters to show their effect on the results. 
+For this dataset we previously selected the defaults parameters. All of the 
+following is not saved and only for demonstration purposes. <br>
+<br>
+This should give you an idea of which parameters to tweak in your own data 
+analysis. <br>
+
+### More iterations
+```{r dimensionality reduction 4iterations, message=FALSE, warning=FALSE}
+# LSI dimensionality reduction
+proj_4iterations = addIterativeLSI( 
+  ArchRProj = proj,
+  useMatrix = "TileMatrix", 
+  name = "IterativeLSI", 
+  iterations = 4, 
+  clusterParams = list( #See Seurat::FindClusters
+    resolution = c(0.2), 
+    sampleCells = 10000, 
+    n.start = 10
+  ), 
+  varFeatures = 25000, 
+  dimsToUse = 1:30,
+  force = TRUE
+)
+```
+
+```{r clustering 4iterations, message=FALSE, warning=FALSE}
+# Clustering
+proj_4iterations = addClusters(
+  input = proj_4iterations,
+  reducedDims = "IterativeLSI",
+  method = "Seurat",
+  name = "Clusters",
+  resolution = 0.8, 
+  force = TRUE
+)
+```
+
+```{r add UMAP embedding 4iterations, message=FALSE}
+# Visualization of clustering as UMAP
+proj_4iterations = addUMAP(
+  ArchRProj = proj_4iterations, 
+  reducedDims = "IterativeLSI", 
+  name = "UMAP", 
+  nNeighbors = 30, 
+  minDist = 0.5, 
+  metric = "cosine", 
+  force = TRUE
+)
+```
+
+```{r visualization in UMAP 4iterations, warning=FALSE, message=FALSE}
+# Color by clusters
+p_clusters_4iterations = plotEmbedding(
+  ArchRProj = proj_4iterations, 
+  colorBy = "cellColData", 
+  name = "Clusters", 
+  embedding = "UMAP", 
+  size = 0.5
+  )
+
+# Color by samples
+p_samples_4iterations = plotEmbedding(
+  ArchRProj = proj_4iterations, 
+  colorBy = "cellColData", 
+  name = "Sample", 
+  embedding = "UMAP", 
+  size = 0.5
+  )
+
+# Plot
+ggAlignPlots(p_clusters_4iterations, p_samples_4iterations, type = "h")
+```
+
+```{r save UMAP plots 4iterations, warning=FALSE, message=FALSE, echo=FALSE}
+# Save as PDF
+plotPDF(p_clusters_4iterations, p_samples_4iterations, 
+  name = "UMAP_clusters_samples_4iterations.pdf", 
+  ArchRProj = proj_4iterations, 
+  addDOC = FALSE, 
+  width = 5, 
+  height = 5
+  )
+```
+
+```{r get marker features 4iterations, message=FALSE, warning=FALSE}
+# Get marker features
+markersGS_4iterations = getMarkerFeatures(
+  ArchRProj = proj_4iterations, 
+  useMatrix = "GeneScoreMatrix", 
+  groupBy = "Clusters",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  testMethod = "wilcoxon"
+)
+```
+
+```{r impute marker genes with MAGIC 4iterations, message=FALSE, warning=FALSE}
+# Add impute weights
+proj_4iterations = addImputeWeights(proj_4iterations)
+
+# These impute weights can then be passed to plotEmbedding() when plotting gene 
+# scores overlayed on the UMAP embedding
+magic_genes_4iterations = plotEmbedding(
+  ArchRProj = proj_4iterations, 
+  colorBy = "GeneScoreMatrix", 
+  name = markerGenes, 
+  embedding = "UMAP",
+  plotAs = "points", 
+  imputeWeights = getImputeWeights(proj_4iterations),
+  size = 0.5
+)
+
+# Plot all genes in cowplot
+magic_genes_cow_4iterations = lapply(magic_genes_4iterations, function(x){
+  x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+      axis.text.x=element_blank(), 
+      axis.ticks.x=element_blank(), 
+      axis.text.y=element_blank(), 
+      axis.ticks.y=element_blank()
+    )
+})
+do.call(cowplot::plot_grid, c(list(ncol = 4), magic_genes_cow_4iterations))
+```
+
+```{r save magic marker genes 4iterations, warning=FALSE, message=FALSE, echo=FALSE}
+# Save
+plotPDF(plotList = magic_genes_4iterations, 
+        name = "Plot-UMAP-MAGIC-Marker-Genes_proj_4iterations.pdf", 
+        ArchRProj = proj_4iterations, 
+        addDOC = FALSE, width = 5, height = 5)
+```
+
+### Less variable features
+```{r dimensionality reduction varFeatures, message=FALSE, warning=FALSE}
+# LSI dimensionality reduction
+proj_varFeatures = addIterativeLSI( 
+  ArchRProj = proj,
+  useMatrix = "TileMatrix", 
+  name = "IterativeLSI", 
+  iterations = 2, 
+  clusterParams = list( #See Seurat::FindClusters
+    resolution = c(0.2), 
+    sampleCells = 10000, 
+    n.start = 10
+  ), 
+  varFeatures = 10000, 
+  dimsToUse = 1:30,
+  force = TRUE
+)
+```
+
+```{r clustering varFeatures, message=FALSE, warning=FALSE}
+# Clustering
+proj_varFeatures = addClusters(
+  input = proj_varFeatures,
+  reducedDims = "IterativeLSI",
+  method = "Seurat",
+  name = "Clusters",
+  resolution = 0.8, 
+  force = TRUE
+)
+```
+
+```{r add UMAP embedding varFeatures, message=FALSE}
+# Visualization of clustering as UMAP
+proj_varFeatures = addUMAP(
+  ArchRProj = proj_varFeatures, 
+  reducedDims = "IterativeLSI", 
+  name = "UMAP", 
+  nNeighbors = 30, 
+  minDist = 0.5, 
+  metric = "cosine", 
+  force = TRUE
+)
+```
+
+```{r visualization in UMAP varFeatures, warning=FALSE, message=FALSE}
+# Color by clusters
+p_clusters_varFeatures = plotEmbedding(
+  ArchRProj = proj_varFeatures, 
+  colorBy = "cellColData", 
+  name = "Clusters", 
+  embedding = "UMAP", 
+  size = 0.5
+  )
+
+# Color by samples
+p_samples_varFeatures = plotEmbedding(
+  ArchRProj = proj_varFeatures, 
+  colorBy = "cellColData", 
+  name = "Sample", 
+  embedding = "UMAP", 
+  size = 0.5
+  )
+
+# Plot
+ggAlignPlots(p_clusters_varFeatures, p_samples_varFeatures, type = "h")
+```
+
+```{r save UMAP plots varFeatures, warning=FALSE, message=FALSE, echo=FALSE}
+# Save as PDF
+plotPDF(p_clusters_varFeatures, p_samples_varFeatures, 
+  name = "UMAP_clusters_sample_varFeaturess.pdf", 
+  ArchRProj = proj_varFeatures, 
+  addDOC = FALSE, 
+  width = 5, 
+  height = 5
+  )
+```
+
+```{r get marker features varFeatures, message=FALSE, warning=FALSE}
+# Get marker features
+markersGS_varFeatures = getMarkerFeatures(
+  ArchRProj = proj_varFeatures, 
+  useMatrix = "GeneScoreMatrix", 
+  groupBy = "Clusters",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  testMethod = "wilcoxon"
+)
+```
+
+```{r impute marker genes with MAGIC varFeatures, message=FALSE, warning=FALSE}
+# Add impute weights
+proj_varFeatures = addImputeWeights(proj_varFeatures)
+
+# These impute weights can then be passed to plotEmbedding() when plotting gene 
+# scores overlayed on the UMAP embedding
+magic_genes_varFeatures = plotEmbedding(
+  ArchRProj = proj_varFeatures, 
+  colorBy = "GeneScoreMatrix", 
+  name = markerGenes, 
+  embedding = "UMAP",
+  plotAs = "points", 
+  imputeWeights = getImputeWeights(proj_varFeatures),
+  size = 0.5
+)
+
+# Plot all genes in cowplot
+magic_genes_cow_varFeatures = lapply(magic_genes_varFeatures, function(x){
+  x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+      axis.text.x=element_blank(), 
+      axis.ticks.x=element_blank(), 
+      axis.text.y=element_blank(), 
+      axis.ticks.y=element_blank()
+    )
+})
+do.call(cowplot::plot_grid, c(list(ncol = 4), magic_genes_cow_varFeatures))
+```
+
+```{r save magic marker genes varFeatures, warning=FALSE, message=FALSE, echo=FALSE}
+# Save
+plotPDF(plotList = magic_genes_varFeatures, 
+        name = "Plot-UMAP-MAGIC-Marker-Genes_proj_varFeatures.pdf", 
+        ArchRProj = proj_varFeatures, 
+        addDOC = FALSE, width = 5, height = 5)
+```
+
+### dimsToUse 2:30
+```{r dimensionality reduction dimsToUse, message=FALSE, warning=FALSE}
+# LSI dimensionality reduction
+proj_dimsToUse = addIterativeLSI( 
+  ArchRProj = proj,
+  useMatrix = "TileMatrix", 
+  name = "IterativeLSI", 
+  iterations = 2, 
+  clusterParams = list( #See Seurat::FindClusters
+    resolution = c(0.2), 
+    sampleCells = 10000, 
+    n.start = 10
+  ), 
+  varFeatures = 25000, 
+  dimsToUse = 2:30,
+  force = TRUE
+)
+```
+
+```{r clustering dimsToUse, message=FALSE, warning=FALSE}
+# Clustering
+proj_dimsToUse = addClusters(
+  input = proj_dimsToUse,
+  reducedDims = "IterativeLSI",
+  method = "Seurat",
+  name = "Clusters",
+  resolution = 0.8, 
+  force = TRUE
+)
+```
+
+```{r add UMAP embedding dimsToUse, message=FALSE}
+# Visualization of clustering as UMAP
+proj_dimsToUse = addUMAP(
+  ArchRProj = proj_dimsToUse, 
+  reducedDims = "IterativeLSI", 
+  name = "UMAP", 
+  nNeighbors = 30, 
+  minDist = 0.5, 
+  metric = "cosine", 
+  force = TRUE
+)
+```
+
+```{r visualization in UMAP dimsToUse, warning=FALSE, message=FALSE}
+# Color by clusters
+p_clusters_dimsToUse = plotEmbedding(
+  ArchRProj = proj_dimsToUse, 
+  colorBy = "cellColData", 
+  name = "Clusters", 
+  embedding = "UMAP", 
+  size = 0.5
+  )
+
+# Color by samples
+p_samples_dimsToUse = plotEmbedding(
+  ArchRProj = proj_dimsToUse, 
+  colorBy = "cellColData", 
+  name = "Sample", 
+  embedding = "UMAP", 
+  size = 0.5
+  )
+
+# Plot
+ggAlignPlots(p_clusters_dimsToUse, p_samples_dimsToUse, type = "h")
+```
+
+```{r save UMAP plots dimsToUse, warning=FALSE, message=FALSE, echo=FALSE}
+# Save as PDF
+plotPDF(p_clusters_dimsToUse, p_samples_dimsToUse, 
+  name = "UMAP_clusters_samples_dimsToUse.pdf", 
+  ArchRProj = proj_dimsToUse, 
+  addDOC = FALSE, 
+  width = 5, 
+  height = 5
+  )
+```
+
+```{r get marker features dimsToUse, message=FALSE, warning=FALSE}
+# Get marker features
+markersGS_dimsToUse = getMarkerFeatures(
+  ArchRProj = proj_dimsToUse, 
+  useMatrix = "GeneScoreMatrix", 
+  groupBy = "Clusters",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  testMethod = "wilcoxon"
+)
+```
+
+```{r impute marker genes with MAGIC dimsToUse, message=FALSE, warning=FALSE}
+# Add impute weights
+proj_dimsToUse = addImputeWeights(proj_dimsToUse)
+
+# These impute weights can then be passed to plotEmbedding() when plotting gene 
+# scores overlayed on the UMAP embedding
+magic_genes_dimsToUse = plotEmbedding(
+  ArchRProj = proj_dimsToUse, 
+  colorBy = "GeneScoreMatrix", 
+  name = markerGenes, 
+  embedding = "UMAP",
+  plotAs = "points", 
+  imputeWeights = getImputeWeights(proj_dimsToUse),
+  size = 0.5
+)
+
+# Plot all genes in cowplot
+magic_genes_cow_dimsToUse = lapply(magic_genes_dimsToUse, function(x){
+  x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+      axis.text.x=element_blank(), 
+      axis.ticks.x=element_blank(), 
+      axis.text.y=element_blank(), 
+      axis.ticks.y=element_blank()
+    )
+})
+do.call(cowplot::plot_grid, c(list(ncol = 4), magic_genes_cow_dimsToUse))
+```
+
+```{r save magic marker genes dimsToUse, warning=FALSE, message=FALSE, echo=FALSE}
+# Save
+plotPDF(plotList = magic_genes_dimsToUse, 
+        name = "Plot-UMAP-MAGIC-Marker-Genes_proj_dimsToUse.pdf", 
+        ArchRProj = proj_dimsToUse, 
+        addDOC = FALSE, width = 5, height = 5)
+```
+
+```{r add UMAP proj, message=FALSE}
+# Visualisation of clustering as UMAP
+proj = addUMAP(
+  ArchRProj = proj, 
+  reducedDims = "IterativeLSI", 
+  name = "UMAP", 
+  nNeighbors = 30, 
+  minDist = 0.5, 
+  metric = "cosine", 
+  force = TRUE
+)
+```
+
+```{r save ArchRProject, message=FALSE, warning=FALSE, echo=FALSE, include=FALSE}
+# Save ArchRProject
+saveArchRProject(proj, 
+  outputDirectory= "ArchRProject", 
+  load = FALSE
+  )
+```
+
+```{r visualization in UMAP embedding proj, message=FALSE}
+# Color by clusters
+p_clusters = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "cellColData", 
+  name = "Clusters", 
+  embedding = "UMAP", 
+  size = 0.5
+  )
+
+# Color by samples
+p_samples = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "cellColData", 
+  name = "Sample", 
+  embedding = "UMAP", 
+  size = 0.5
+  )
+
+# Plot
+ggAlignPlots(p_clusters, p_samples, type = "h")
+```
+
+```{r save UMAP plots after removing contamination, warning=FALSE, message=FALSE, echo=FALSE}
+# Save as PDF
+plotPDF(p_clusters, p_samples, 
+  name = "UMAP_clusters_samples.pdf", 
+  ArchRProj = proj, 
+  addDOC = FALSE, 
+  width = 5, 
+  height = 5
+  )
+```
+
+## Filtering out barcodes marked as non-cell by CellRanger
+```{r evaluate cell barcodes, message=FALSE, warning=FALSE}
+# We use additional Cell Ranger information to filter out low-quality cells.
+# For this we use the "is__cell_barcode" column of the "singlecell.csv" file, 
+# which maps high-quality cells to 1.
+singlecell = list()
+for (x in c("1","4","5","8","9")){
+  # Define filenames and read files
+  filename = paste("Data/MD_scATAC_",x,"/singlecell.csv",sep = "") 
+  data = read.csv(filename)
+  # To match quality information to cells, we need the barcodes to match the 
+  # ones in our ArchRProject. For this we:
+  # 1) create a vector of "scATAC_x#"
+  # 2) add vector as a column to the data
+  # 3) create column containing ArchRProj-style barcodes
+  bc = c(rep(paste("scATAC_",x,"#",sep = ""),nrow(data))) 
+  data_barcode = cbind(bc,data) 
+  data_fullbc = data_barcode %>% unite("full_barcode", bc:barcode, remove = FALSE, sep = "") 
+  singlecell[[x]] = data_fullbc
+}
+
+# Combine the dataframes
+singlecell_fullbc = rbindlist(singlecell, use.names = FALSE, fill = FALSE) 
+
+# Extract rownames that are also in the ArchRProject
+rownames_archr = rownames(proj@cellColData)
+subset_singlecell_fullbc = singlecell_fullbc[singlecell_fullbc$full_barcode %in% rownames_archr, ]
+
+# Extract is__cell_barcode column from singlecell.csv and give it barcodes as rownames
+df_is_cell_barcode = as.data.frame(subset_singlecell_fullbc$is__cell_barcode)
+rownames(df_is_cell_barcode) = subset_singlecell_fullbc$full_barcode
+
+# Order is_cell_barcode the way the ArchRProject is ordered and create filter
+is_cell_barcode = df_is_cell_barcode[order(match(rownames(df_is_cell_barcode), rownames_archr)), ]
+filter_archr = is_cell_barcode==1
+```
+
+```{r highlight cells to be filtered out on UMAP, warning=FALSE, message=FALSE}
+# Create column in the ArchRProject containing is_cell_barcode information
+proj@cellColData$is_cell_barcode = as.character(is_cell_barcode)
+
+# Plot
+UMAP_cellranger_filter = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "cellColData", 
+  name = "is_cell_barcode",
+  embedding = "UMAP", 
+  size = 0.5,
+  plotAs = "points",
+  pal = c("1" = "lightgrey", "0" = "#D51F26")
+  )
+UMAP_cellranger_filter
+```
+
+```{r filter for cell barcodes, message=FALSE, warning=FALSE, eval=FALSE}
+# Filter ArchRProject for is_cell_barcode==1
+proj = proj[filter_archr, ]
+```
+
+```{r save ArchRProject after filtering for cell barcodes, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE}
+saveArchRProject(proj, 
+  outputDirectory= "ArchRProject_filtered", 
+  overwrite = TRUE,  
+  load = FALSE
+)
+```
+
+```{r load ArchRProject 5, echo=T, results='hide', message=FALSE, include=FALSE}
+# Load ArchRProject
+proj = loadArchRProject(
+  path = "ArchRProject_filtered", 
+  force = TRUE, 
+  showLogo = FALSE
+  )
+```
+
+# Filter doublets
+## Calculate doublet scores
+```{r calculate doublet scores, message=FALSE, warning=FALSE, results='hide', eval=FALSE}
+# Calculate doublet scores on the ArchRProject
+proj = addDoubletScores(
+  input = proj,
+  k = 10, #Refers to how many cells near a "pseudo-doublet" to count
+  knnMethod = "UMAP", #Refers to the embedding to use for nearest neighbor search
+  LSIMethod = 1, 
+  force = TRUE
+)
+```
+
+```{r save ArchRProject after adding doublet scores, message=FALSE, warning=FALSE, echo=FALSE,  include=FALSE}
+# Save ArchRProject
+saveArchRProject(proj, 
+  outputDirectory= "ArchRProject_filtered", 
+  overwrite = TRUE
+  )
+```
+
+## Test different doublet filter ratios
+In the next step, we evaluate different filter ratios. The filter ratio 
+determines how many cells will be filtered out as doublets. Doublets scores were
+calculated above. 
+
+### FilterRatio = 0.5
+```{r load ArchRProject 2, echo=T, results='hide', message=FALSE, include=FALSE}
+# Load ArchRProject
+proj_tmp = loadArchRProject(
+  path = "ArchRProject_FR0-5", 
+  force = TRUE, 
+  showLogo = FALSE
+  )
+```
+
+```{r test filterRatio 0-5, message=TRUE, warning=FALSE, eval=FALSE}
+# Create temporary project and filter doublets 
+proj_tmp = filterDoublets(
+  proj,
+  filterRatio = 0.5
+  )
+```
+
+```{r filterRatio 0-5: visualize, message=FALSE, warning=FALSE, eval=FALSE}
+# Visualize (and compare to non-filtered sample)
+# LSI dimensional reduction:
+proj_tmp = addIterativeLSI(
+  ArchRProj = proj_tmp,
+  useMatrix = "TileMatrix",
+  name = "IterativeLSI",
+  iterations = 2, 
+  clusterParams = list( #See Seurat::FindClusters
+    resolution = c(0.2), 
+    sampleCells = 10000, 
+    n.start = 10 
+  ),
+  varFeatures = 25000, 
+  dimsToUse = 1:30,
+  force = TRUE
+)
+
+# Clustering
+proj_tmp = addClusters(
+  input = proj_tmp,
+  reducedDims = "IterativeLSI",
+  method = "Seurat",
+  name = "Clusters",
+  resolution = 0.8, 
+  force = TRUE
+)
+
+# Visualisation as UMAP
+proj_tmp = addUMAP(
+  ArchRProj = proj_tmp, 
+  reducedDims = "IterativeLSI", 
+  name = "UMAP", 
+  nNeighbors = 30, 
+  minDist = 0.5, 
+  metric = "cosine", 
+  force = TRUE
+)
+```
+
+```{r filterratio0-5: plot UMAPs, warning=FALSE, message=FALSE}
+# Color by clusters
+p_clusters_tmp = plotEmbedding(
+  ArchRProj = proj_tmp, 
+  colorBy = "cellColData", 
+  name = "Clusters", 
+  embedding = "UMAP", 
+  size = 0.5
+  )
+
+# Color by samples
+p_samples_tmp = plotEmbedding(
+  ArchRProj = proj_tmp, 
+  colorBy = "cellColData", 
+  name = "Sample", 
+  embedding = "UMAP", 
+  size = 0.5
+)
+
+# Plot
+ggAlignPlots(p_clusters_tmp, p_samples_tmp, type = "h")
+
+# Color by doublet enrichment score
+p_doubscore_tmp = plotEmbedding(
+  ArchRProj = proj_tmp, 
+  colorBy = "cellColData", 
+  name = "DoubletScore", 
+  embedding = "UMAP", 
+  plotAs = "points", 
+  size = 0.5
+)
+
+p_doubenr_tmp = plotEmbedding(
+  ArchRProj = proj_tmp, 
+  colorBy = "cellColData", 
+  name = "DoubletEnrichment", 
+  embedding = "UMAP", 
+  plotAs = "points", 
+  size = 0.5
+)
+
+# Color by number of fragments per cell
+p_nfrags_tmp = plotEmbedding(
+  ArchRProj = proj_tmp, 
+  colorBy = "cellColData", 
+  name = "nFrags", 
+  embedding = "UMAP", 
+  plotAs = "points", 
+  size = 0.5
+)
+
+# Plot
+plot_grid(p_doubscore_tmp, p_doubenr_tmp, p_nfrags_tmp, align = "h", ncol = 3, scale = 1.1)
+```
+
+```{r filterratio0-5: save UMAPs, warning=FALSE, message=FALSE, echo=FALSE, eval=FALSE}
+# Save as PDF
+plotPDF(p_clusters_tmp, p_samples_tmp, p_doubscore_tmp, p_doubenr_tmp, p_nfrags_tmp, 
+  name = "UMAP_FILTER0-5_clusters_samples_doubscore_nfrags.pdf", 
+  ArchRProj = proj, 
+  addDOC = FALSE, 
+  width = 5, 
+  height = 5
+)
+```
+
+```{r filterratio0-5: overlay genescores, warning=FALSE, message=FALSE}
+# Check whether the biology makes sense
+# Overlay gene scores on UMAP embedding of proj_tmp, use MAGIC smoothing
+
+# Get marker features
+markersGS_tmp = getMarkerFeatures(
+  ArchRProj = proj_tmp, 
+  useMatrix = "GeneScoreMatrix", 
+  groupBy = "Clusters",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  testMethod = "wilcoxon"
+)
+
+# Add impute weights
+proj_tmp = addImputeWeights(proj_tmp)
+
+# Plot
+magic_genes_tmp = plotEmbedding(
+  ArchRProj = proj_tmp, 
+  colorBy = "GeneScoreMatrix", 
+  name = markerGenes, 
+  embedding = "UMAP",
+  plotAs = "points", 
+  imputeWeights = getImputeWeights(proj_tmp),
+  size = 0.5
+)
+
+# Plot all genes in cowplot
+magic_genes_cow_tmp = lapply(magic_genes_tmp, function(x){
+  x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+      axis.text.x=element_blank(), 
+      axis.ticks.x=element_blank(), 
+      axis.text.y=element_blank(), 
+      axis.ticks.y=element_blank()
+    )
+})
+do.call(cowplot::plot_grid, c(list(ncol = 4), magic_genes_cow_tmp))
+```
+
+```{r filterratio0-5: save genescores, warning=FALSE, message=FALSE, echo=FALSE, eval=FALSE}
+# Save
+plotPDF(plotList = magic_genes_tmp, 
+        name = "Plot-UMAP_FILTER0-5-MAGIC-Marker-Genes_proj.pdf", 
+        ArchRProj = proj, 
+        addDOC = FALSE, width = 5, height = 5)
+```
+
+```{r markers as violin plots filterratio0-5, message=FALSE, warning=FALSE}
+# Sometimes it can also help to look at the gene scores visualized as violin
+# plots for the single clusters
+p_Cd4 = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Cd4",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Cd4
+
+p_Il2ra = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Il2ra",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Il2ra
+
+p_Foxp3 = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Foxp3",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Foxp3
+
+p_Batf = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Batf",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Batf
+
+p_Ccr8 = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Ccr8",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Ccr8
+
+p_Ikzf2 = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Ikzf2",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Ikzf2
+
+p_Rorc = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Rorc",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Rorc
+
+p_Tbx21 = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Tbx21",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Tbx21
+
+p_Ifng = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Ifng",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Ifng
+
+p_Gata3 = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Gata3",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Gata3
+
+p_Klrg1 = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Klrg1",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Klrg1
+
+p_Il2 = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Il2",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Il2
+```
+
+```{r filterratio0-5: save violin plots, warning=FALSE, message=FALSE, echo=FALSE, eval=FALSE}
+# Save as PDF
+plotPDF(p_Cd4, p_Il2ra, p_Foxp3, p_Batf, p_Ccr8, p_Ikzf2, p_Rorc, p_Tbx21, p_Ifng, p_Gata3, p_Klrg1, p_Il2, 
+  name = "UMAP_FILTER0-5_violin.pdf", 
+  ArchRProj = proj, 
+  addDOC = FALSE, 
+  width = 5, 
+  height = 5
+)
+```
+
+```{r cells per cluster filterratio0-5, warning=FALSE, message=FALSE}
+# Cell numbers per cluster
+cM_proj_tmp = confusionMatrix(paste0(proj_tmp$Clusters), paste0(proj_tmp$Sample))
+cM_proj_tmp
+```
+
+```{r save cells per cluster filterratio0-5, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Save
+write.csv(as.data.frame(cM_proj_tmp), "./ArchRProject/Plots/cells_per_cluster_filterratio0-5.csv", row.names=FALSE)
+```
+
+```{r save ArchRProj FR0.5, message=FALSE, warning=FALSE, eval=FALSE, include=FALSE}
+# Save ArchRProject
+saveArchRProject(proj_tmp, 
+  outputDirectory= "ArchRProject_FR0-5", 
+  load = FALSE,
+  overwrite = TRUE
+  )
+```
+
+### FilterRatio = 1
+```{r load ArchRProject 3, echo=T, results='hide', message=FALSE, include=FALSE}
+# Load ArchRProject
+proj_tmp = loadArchRProject(
+  path = "ArchRProject_FR1", 
+  force = TRUE, 
+  showLogo = FALSE
+  )
+```
+
+```{r test filterRatio 1, message=TRUE, warning=FALSE, eval=FALSE}
+# Create temporary project and filter doublets
+proj_tmp = filterDoublets(
+  proj,
+  filterRatio = 1 
+  )
+```
+
+```{r filterratio 1: visualize, message=FALSE, warning=FALSE, eval=FALSE}
+# Visualize (and compare to non-filtered sample):
+# LSI dimensional reduction:
+proj_tmp = addIterativeLSI(
+  ArchRProj = proj_tmp,
+  useMatrix = "TileMatrix",
+  name = "IterativeLSI",
+  iterations = 2, 
+  clusterParams = list( #See Seurat::FindClusters
+    resolution = c(0.2), 
+    sampleCells = 10000, 
+    n.start = 10 
+  ),
+  varFeatures = 25000, 
+  dimsToUse = 1:30,
+  force = TRUE
+)
+
+# Clustering
+proj_tmp = addClusters(
+  input = proj_tmp,
+  reducedDims = "IterativeLSI",
+  method = "Seurat",
+  name = "Clusters",
+  resolution = 0.8, 
+  force = TRUE
+)
+
+# Visualisation as UMAP
+proj_tmp = addUMAP(
+  ArchRProj = proj_tmp, 
+  reducedDims = "IterativeLSI", 
+  name = "UMAP", 
+  nNeighbors = 30, 
+  minDist = 0.5, 
+  metric = "cosine", 
+  force = TRUE
+)
+```
+
+```{r filterratio1: plot UMAPs, warning=FALSE, message=FALSE}
+# Color by clusters
+p_clusters_tmp = plotEmbedding(
+  ArchRProj = proj_tmp, 
+  colorBy = "cellColData", 
+  name = "Clusters", 
+  embedding = "UMAP", 
+  size = 0.5
+  )
+
+# Color by samples
+p_samples_tmp = plotEmbedding(
+  ArchRProj = proj_tmp, 
+  colorBy = "cellColData", 
+  name = "Sample", 
+  embedding = "UMAP", 
+  size = 0.5
+)
+
+# Plot
+ggAlignPlots(p_clusters_tmp, p_samples_tmp, type = "h")
+
+# Color by doublet enrichment score
+p_doubscore_tmp = plotEmbedding(
+  ArchRProj = proj_tmp, 
+  colorBy = "cellColData", 
+  name = "DoubletScore", 
+  embedding = "UMAP", 
+  plotAs = "points", 
+  size = 0.5
+)
+
+p_doubenr_tmp = plotEmbedding(
+  ArchRProj = proj_tmp, 
+  colorBy = "cellColData", 
+  name = "DoubletEnrichment", 
+  embedding = "UMAP", 
+  plotAs = "points", 
+  size = 0.5
+)
+
+# Color by number of fragments per cell
+p_nfrags_tmp = plotEmbedding(
+  ArchRProj = proj_tmp, 
+  colorBy = "cellColData", 
+  name = "nFrags", 
+  embedding = "UMAP", 
+  plotAs = "points", 
+  size = 0.5
+)
+
+# Plot
+plot_grid(p_doubscore_tmp, p_doubenr_tmp, p_nfrags_tmp, align = "h", ncol = 3, scale = 1.1)
+```
+
+```{r filterratio1: save UMAPs, warning=FALSE, message=FALSE, echo=FALSE, eval=FALSE}
+# Save as PDF
+plotPDF(p_clusters_tmp, p_samples_tmp, p_doubscore_tmp, p_doubenr_tmp, p_nfrags_tmp, 
+  name = "UMAP_FILTER1_clusters_samples_doubscore_nfrags.pdf", 
+  ArchRProj = proj, 
+  addDOC = FALSE, 
+  width = 5, 
+  height = 5
+)
+```
+
+```{r filterratio1: overlay genescores, warning=FALSE, message=FALSE}
+# Get marker features
+markersGS_tmp = getMarkerFeatures(
+  ArchRProj = proj_tmp, 
+  useMatrix = "GeneScoreMatrix", 
+  groupBy = "Clusters",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  testMethod = "wilcoxon"
+)
+
+# Add impute weights
+proj_tmp = addImputeWeights(proj_tmp)
+
+# Plot
+magic_genes_tmp = plotEmbedding(
+  ArchRProj = proj_tmp, 
+  colorBy = "GeneScoreMatrix", 
+  name = markerGenes, 
+  embedding = "UMAP", 
+  plotAs = "points", 
+  imputeWeights = getImputeWeights(proj_tmp),
+  size = 0.5
+)
+
+# Plot all genes in cowplot
+magic_genes_cow_tmp = lapply(magic_genes_tmp, function(x){
+  x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+      axis.text.x=element_blank(), 
+      axis.ticks.x=element_blank(), 
+      axis.text.y=element_blank(), 
+      axis.ticks.y=element_blank()
+    )
+})
+do.call(cowplot::plot_grid, c(list(ncol = 4), magic_genes_cow_tmp))
+```
+
+```{r filterratio1: save genescores, warning=FALSE, message=FALSE, echo=FALSE, eval=FALSE}
+# Save
+plotPDF(plotList = magic_genes_tmp, 
+        name = "Plot-UMAP_FILTER1-MAGIC-Marker-Genes_proj.pdf", 
+        ArchRProj = proj, 
+        addDOC = FALSE, width = 5, height = 5)
+```
+
+```{r markers as violin plots filterratio1, message=FALSE, warning=FALSE}
+# Sometimes it can also help to look at the gene scores visualized as violin
+# plots for the single clusters
+p_Cd4 = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Cd4",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Cd4
+
+p_Il2ra = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Il2ra",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Il2ra
+
+p_Foxp3 = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Foxp3",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Foxp3
+
+p_Batf = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Batf",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Batf
+
+p_Ccr8 = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Ccr8",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Ccr8
+
+p_Ikzf2 = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Ikzf2",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Ikzf2
+
+p_Rorc = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Rorc",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Rorc
+
+p_Tbx21 = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Tbx21",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Tbx21
+
+p_Ifng = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Ifng",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Ifng
+
+p_Gata3 = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Gata3",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Gata3
+
+p_Klrg1 = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Klrg1",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Klrg1
+
+p_Il2 = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Il2",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Il2
+```
+
+```{r filterratio1: save violin plots, warning=FALSE, message=FALSE, echo=FALSE, eval=FALSE}
+# Save as PDF
+plotPDF(p_Cd4, p_Il2ra, p_Foxp3, p_Batf, p_Ccr8, p_Ikzf2, p_Rorc, p_Tbx21, p_Ifng, p_Gata3, p_Klrg1, p_Il2, 
+  name = "UMAP_FILTER1_violin.pdf", 
+  ArchRProj = proj, 
+  addDOC = FALSE, 
+  width = 5, 
+  height = 5
+)
+```
+
+```{r cells per cluster filterratio1, echo=TRUE, message=FALSE, warning=FALSE}
+# Cell numbers per cluster
+cM_proj_tmp = confusionMatrix(paste0(proj_tmp$Clusters), paste0(proj_tmp$Sample))
+cM_proj_tmp
+```
+
+```{r save cells per cluster filterratio1, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Save
+write.csv(as.data.frame(cM_proj_tmp), "./ArchRProject/Plots/cells_per_cluster_filterratio1.csv", row.names=FALSE)
+```
+
+```{r save ArchRProj FR1, message=FALSE, warning=FALSE, eval=FALSE, include=FALSE}
+# Save ArchRProject
+saveArchRProject(proj_tmp, 
+  outputDirectory= "ArchRProject_FR1", 
+  load = FALSE,
+  overwrite = TRUE
+  )
+```
+
+### FilterRatio = 2
+```{r load ArchRProject 4, echo=T, results='hide', message=FALSE, include=FALSE}
+# Load ArchRProject
+proj_tmp = loadArchRProject(
+  path = "ArchRProject_FR2", 
+  force = TRUE, 
+  showLogo = FALSE
+  )
+```
+
+```{r test filterRatio 2, message=TRUE, warning=FALSE, eval=FALSE}
+# Create temporary project and filter doublets
+proj_tmp = filterDoublets(
+  proj,
+  filterRatio = 2 
+  )
+```
+
+```{r filterRatio 2: visualize, message=FALSE, warning=FALSE, eval=FALSE}
+# Visualize (and compare to non-filtered sample)
+# LSI dimensional reduction
+proj_tmp = addIterativeLSI(
+  ArchRProj = proj_tmp,
+  useMatrix = "TileMatrix",
+  name = "IterativeLSI",
+  iterations = 2, 
+  clusterParams = list( #See Seurat::FindClusters
+    resolution = c(0.2), 
+    sampleCells = 10000, 
+    n.start = 10 
+  ),
+  varFeatures = 25000, 
+  dimsToUse = 1:30,
+  force = TRUE
+)
+
+# Clustering
+proj_tmp = addClusters(
+  input = proj_tmp,
+  reducedDims = "IterativeLSI",
+  method = "Seurat",
+  name = "Clusters",
+  resolution = 0.8, 
+  force = TRUE
+)
+
+# Visualisation as UMAP
+proj_tmp = addUMAP(
+  ArchRProj = proj_tmp, 
+  reducedDims = "IterativeLSI", 
+  name = "UMAP", 
+  nNeighbors = 30, 
+  minDist = 0.5, 
+  metric = "cosine", 
+  force = TRUE
+)
+```
+
+```{r filterratio2: plot UMAPs, warning=FALSE, message=FALSE}
+# Color by clusters
+p_clusters_tmp = plotEmbedding(
+  ArchRProj = proj_tmp, 
+  colorBy = "cellColData", 
+  name = "Clusters", 
+  embedding = "UMAP", 
+  size = 0.5
+  )
+
+# Color by samples
+p_samples_tmp = plotEmbedding(
+  ArchRProj = proj_tmp, 
+  colorBy = "cellColData", 
+  name = "Sample", 
+  embedding = "UMAP", 
+  size = 0.5
+)
+
+# Plot
+ggAlignPlots(p_clusters_tmp, p_samples_tmp, type = "h")
+
+# Color by doublet enrichment score
+p_doubscore_tmp = plotEmbedding(
+  ArchRProj = proj_tmp, 
+  colorBy = "cellColData", 
+  name = "DoubletScore", 
+  embedding = "UMAP", 
+  plotAs = "points", 
+  size = 0.5
+)
+
+p_doubenr_tmp = plotEmbedding(
+  ArchRProj = proj_tmp, 
+  colorBy = "cellColData", 
+  name = "DoubletEnrichment", 
+  embedding = "UMAP", 
+  plotAs = "points", 
+  size = 0.5
+)
+
+# Color by number of fragments per cell
+p_nfrags_tmp = plotEmbedding(
+  ArchRProj = proj_tmp, 
+  colorBy = "cellColData", 
+  name = "nFrags", 
+  embedding = "UMAP", 
+  plotAs = "points", 
+  size = 0.5
+)
+
+# Plot
+plot_grid(p_doubscore_tmp, p_doubenr_tmp, p_nfrags_tmp, align = "h", ncol = 3, scale = 1.1)
+```
+
+```{r filterratio2: save UMAPs, warning=FALSE, message=FALSE, echo=FALSE, eval=FALSE}
+# Save as PDF
+plotPDF(p_clusters_tmp, p_samples_tmp, p_doubscore_tmp, p_doubenr_tmp, p_nfrags_tmp, 
+  name = "UMAP_FILTER2_clusters_samples_doubscore_nfrags.pdf", 
+  ArchRProj = proj, 
+  addDOC = FALSE, 
+  width = 5, 
+  height = 5
+)
+```
+
+```{r filterratio2: overlay genescores, warning=FALSE, message=FALSE}
+# Get marker features
+markersGS_tmp = getMarkerFeatures(
+  ArchRProj = proj_tmp, 
+  useMatrix = "GeneScoreMatrix", 
+  groupBy = "Clusters",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  testMethod = "wilcoxon"
+)
+
+# Add impute weights
+proj_tmp = addImputeWeights(proj_tmp)
+
+# Plot
+magic_genes_tmp = plotEmbedding(
+  ArchRProj = proj_tmp, 
+  colorBy = "GeneScoreMatrix", 
+  name = markerGenes, 
+  embedding = "UMAP",
+  plotAs = "points", 
+  imputeWeights = getImputeWeights(proj_tmp),
+  size = 0.5
+)
+
+# Plot all genes in cowplot
+magic_genes_cow_tmp = lapply(magic_genes_tmp, function(x){
+  x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+      axis.text.x=element_blank(), 
+      axis.ticks.x=element_blank(), 
+      axis.text.y=element_blank(), 
+      axis.ticks.y=element_blank()
+    )
+})
+do.call(cowplot::plot_grid, c(list(ncol = 4), magic_genes_cow_tmp))
+```
+
+```{r filterratio2: save genescores, warning=FALSE, message=FALSE, echo=FALSE, eval=FALSE}
+# Save
+plotPDF(plotList = magic_genes_tmp, 
+        name = "Plot-UMAP_FILTER2-MAGIC-Marker-Genes_proj.pdf", 
+        ArchRProj = proj, 
+        addDOC = FALSE, width = 5, height = 5)
+```
+
+```{r markers as violin plots filterratio2, message=FALSE, warning=FALSE}
+# Sometimes it can also help to look at the gene scores visualized as violin
+# plots for the single clusters
+p_Cd4 = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Cd4",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Cd4
+
+p_Il2ra = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Il2ra",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Il2ra
+
+p_Foxp3 = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Foxp3",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Foxp3
+
+p_Batf = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Batf",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Batf
+
+p_Ccr8 = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Ccr8",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Ccr8
+
+p_Ikzf2 = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Ikzf2",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Ikzf2
+
+p_Rorc = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Rorc",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Rorc
+
+p_Tbx21 = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Tbx21",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Tbx21
+
+p_Ifng = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Ifng",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Ifng
+
+p_Gata3 = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Gata3",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Gata3
+
+p_Klrg1 = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Klrg1",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Klrg1
+
+p_Il2 = plotGroups(
+  ArchRProj = proj_tmp, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Il2",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Il2
+```
+
+```{r filterratio2: save violin plots, warning=FALSE, message=FALSE, echo=FALSE, eval=FALSE}
+# Save as PDF
+plotPDF(p_Cd4, p_Il2ra, p_Foxp3, p_Batf, p_Ccr8, p_Ikzf2, p_Rorc, p_Tbx21, p_Ifng, p_Gata3, p_Klrg1, p_Il2, 
+  name = "UMAP_FILTER2_violin.pdf", 
+  ArchRProj = proj, 
+  addDOC = FALSE, 
+  width = 5, 
+  height = 5
+)
+```
+
+```{r cells per cluster filterratio2, warning=FALSE, message=FALSE}
+# Cell numbers per cluster
+cM_proj_tmp = confusionMatrix(paste0(proj_tmp$Clusters), paste0(proj_tmp$Sample))
+cM_proj_tmp
+```
+
+```{r save cells per cluster filterratio2, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Save
+write.csv(as.data.frame(cM_proj_tmp), "./ArchRProject/Plots/cells_per_cluster_filterratio2.csv", row.names=FALSE)
+```
+
+```{r FR2, include=FALSE, message=FALSE, warning=FALSE, eval=FALSE, include=FALSE}
+# Save ArchRProject
+saveArchRProject(proj_tmp, 
+  outputDirectory= "ArchRProject_FR2", 
+  load = FALSE,
+  overwrite = TRUE
+  )
+```
+
+## Filtering doublets
+```{r load ArchRProject 6, echo=T, message=FALSE, warning=FALSE, results='hide', eval=FALSE}
+# Load ArchRProject
+proj = loadArchRProject(
+  path = "ArchRProject_FR1", 
+  force = TRUE, 
+  showLogo = FALSE
+  )
+```
+
+```{r filter doublets, warning=FALSE, message=TRUE, eval=FALSE}
+# Create new ArchRProject and filter doublets with the filter ratio chosen based
+# on the test runs above
+proj = filterDoublets(
+  proj,
+  filterRatio = 1, 
+  )
+```
+
+```{r save ArchRProject after doublet filtering, message=FALSE, warning=FALSE, echo=FALSE, include=FALSE, eval=FALSE}
+# Save ArchRProject
+saveArchRProject(proj, 
+  outputDirectory= "ArchRProject_filtered2", 
+  load = FALSE,
+  overwrite = TRUE
+  )
+```
+
+```{r clustering after doublet filtering, message=FALSE, warning=FALSE, eval=FALSE}
+# Clustering
+proj = addClusters(
+  input = proj,
+  reducedDims = "IterativeLSI",
+  method = "Seurat",
+  name = "Clusters",
+  resolution = 0.8, 
+  force = TRUE
+)
+```
+
+```{r after doublet filtering - add UMAP embedding, message=FALSE, warning=FALSE, eval=FALSE}
+# Visualization in UMAP embedding
+proj = addUMAP(
+  ArchRProj = proj, 
+  reducedDims = "IterativeLSI", 
+  name = "UMAP", 
+  nNeighbors = 30, 
+  minDist = 0.5, 
+  metric = "cosine", 
+  force = TRUE
+)
+```
+
+```{r after doublet filtering - visualization in UMAP embedding, message=FALSE, warning=FALSE}
+# Color by clusters
+p_clusters_final = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "cellColData", 
+  name = "Clusters", 
+  embedding = "UMAP", 
+  size = 0.5
+  )
+
+# Color by samples
+p_samples_final = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "cellColData", 
+  name = "Sample", 
+  embedding = "UMAP", 
+  size = 0.5
+  )
+
+# Plot
+ggAlignPlots(p_clusters_final, p_samples_final, type = "h")
+```
+
+```{r post doublet filtering, include=FALSE, eval=FALSE}
+# Save ArchRProject
+saveArchRProject(proj, 
+  outputDirectory= "ArchRProject_filtered2", 
+  load = FALSE,
+  overwrite = TRUE
+  )
+```
+
+```{r load ArchRProject 7, echo=T, message=FALSE, warning=FALSE, results='hide'}
+# Load ArchRProject
+proj = loadArchRProject(
+  path = "ArchRProject_filtered2", 
+  force = TRUE, 
+  showLogo = FALSE
+  )
+```
+
+# Test batch effect correction using HARMONY
+One possible analysis step is batch effect correction using HARMONY. Usually, 
+this should help reduce the batch effect in the data while maintaining biological 
+effects. <br>
+
+In our specific case, the batch effect correction did not improve the data, 
+which is why we omitted this step and only show it for demonstration purposes.
+
+```{r add cell type anno, message=FALSE, warning=FALSE, eval=FALSE}
+# Add cell type annotation according to gene scores (see above) in order to be 
+# able to evaluate the performance of HARMONY
+
+clusters = as.data.frame(proj@cellColData$Clusters)
+colnames(clusters) = "V1"
+
+clusters = clusters %>% mutate(across("V1", str_replace, "^C8$", "tisTreg")) 
+clusters = clusters %>% mutate(across("V1", str_replace, "^C15$", "tisTreg"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C14$", "tisTreg"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C12$", "tisTreg"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C13$", "pTreg")) 
+clusters = clusters %>% mutate(across("V1", str_replace, "^C11$", "tisTreg precursor"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C10$", "tisTreg precursor"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C5$", "naive CD4+"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C4$", "naive CD4+"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C2$", "naive CD4+"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C3$", "naive CD4+"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C19$", "Th1"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C17$", "Th1"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C16$", "Th1"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C20$", "Th17"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C18$", "Th2"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C1$", "undefined"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C6$", "undefined"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C7$", "undefined"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C9$", "undefined"))
+
+clusters_vector = as.vector(clusters$V1)
+proj@cellColData$Celltype = clusters_vector
+```
+
+```{r test batch effect correction using HARMONY, message=FALSE, warning=FALSE}
+# https://github.com/immunogenomics/harmony
+
+# Create a new ArchRProject with a reducedDims object named “Harmony”
+proj_harmonyTest = addHarmony(
+  ArchRProj = proj,
+  reducedDims = "IterativeLSI",
+  name = "Harmony",
+  groupBy = "Sample"
+)
+
+# UMAP for Harmony reductedDims object
+proj_harmonyTest = addUMAP(
+  ArchRProj = proj_harmonyTest, 
+  reducedDims = "Harmony", 
+  name = "UMAPHarmony", 
+  nNeighbors = 30, 
+  minDist = 0.5, 
+  metric = "cosine",
+  force = TRUE
+)
+
+# Color by clusters
+p_clusters_Harmony = plotEmbedding(
+  ArchRProj = proj_harmonyTest, 
+  colorBy = "cellColData", 
+  name = "Clusters", 
+  embedding = "UMAPHarmony", 
+  size = 0.5
+)
+
+# Color by samples
+p_samples_Harmony = plotEmbedding(
+  ArchRProj = proj_harmonyTest, 
+  colorBy = "cellColData", 
+  name = "Sample", 
+  embedding = "UMAPHarmony", 
+  size = 0.5
+)
+
+# Color by cell type annotation
+p_celltype_Harmony = plotEmbedding(
+  ArchRProj = proj_harmonyTest, 
+  colorBy = "cellColData", 
+  name = "Celltype", 
+  embedding = "UMAPHarmony", 
+  size = 0.5
+)
+
+# Plot
+plot_grid(p_clusters_Harmony, p_samples_Harmony, p_celltype_Harmony, align = "h", ncol = 3, scale = 1.1)
+```
+
+```{r save harmony test, warning=FALSE, message=FALSE, echo=FALSE}
+# Save as PDF
+plotPDF(p_clusters_Harmony, p_samples_Harmony,
+        name = "UMAPHarmony_clusters_samples_doubscore_nfrags.pdf", 
+        ArchRProj = proj_harmonyTest, 
+        addDOC = FALSE, 
+        width = 5, 
+        height = 5
+)
+```
+
+```{r overlay gene scores on UMAPHarmony embedding with MAGIC smoothing, message=FALSE, warning=FALSE}
+# Add impute weights
+proj_harmonyTest = addImputeWeights(proj_harmonyTest)
+
+# overlay gene scores on UMAPHarmony embedding with MAGIC smoothing
+magic_genes_harmony = plotEmbedding(
+  ArchRProj = proj_harmonyTest, 
+  colorBy = "GeneScoreMatrix", 
+  name = markerGenes, 
+  embedding = "UMAPHarmony",
+  plotAs = "points", 
+  imputeWeights = getImputeWeights(proj_harmonyTest),
+  size = 0.5
+)
+
+# Plot all genes in cowplot
+magic_genes_harmony_cow = lapply(magic_genes_harmony, function(x){
+  x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+      axis.text.x=element_blank(), 
+      axis.ticks.x=element_blank(), 
+      axis.text.y=element_blank(), 
+      axis.ticks.y=element_blank()
+    )
+})
+do.call(cowplot::plot_grid, c(list(ncol = 4), magic_genes_harmony_cow))
+```
+
+```{r save magic harmony test, warning=FALSE, message=FALSE, echo=FALSE}
+# Save
+plotPDF(plotList = magic_genes_harmony, 
+        name = "Plot-UMAPHarmony-MAGIC-Marker-Genes.pdf", 
+        ArchRProj = proj, 
+        addDOC = FALSE, width = 5, height = 5)
+```
+
+```{r harmony, include=FALSE, eval=FALSE}
+# Save ArchRProject
+saveArchRProject(proj_harmonyTest, 
+  outputDirectory= "ArchRProject_harmonyTest", 
+  load = FALSE,
+  overwrite = TRUE
+  )
+```
+
+# Final filtered dataset
+```{r sample statistics plots for final filtered proj, message=FALSE, warning=FALSE}
+# 1. Show TSS enrichment score for each sample in a ridge plot.
+# The TSS enrichment score is a proxy for the quality of the sample and should
+# be similar in all samples in the dataset.
+p1 = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Sample", 
+  colorBy = "cellColData", 
+  name = "TSSEnrichment",
+  plotAs = "ridges"
+)
+p1
+
+# 2. You can also display TSS enrichment scores in a violin plot.
+# Lower and upper hinges correspond to the 25th and 75th percentiles, the middle
+# corresponds to the median. Lower and upper whiskers extend from the hinge to 
+# the lowest or highest value or 1.5 times the IQR.
+p2 = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Sample", 
+  colorBy = "cellColData", 
+  name = "TSSEnrichment",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p2
+
+# 3. Show log10(unique nuclear fragments) for each sample in a ridge plot.
+# It would be ideal if all of the samples have a similar number of fragments 
+# per cell. If this is not the case, you can downsample the files by randomly
+# removing fragments from the larger sample(s) in the fragments.tsv.gz file.
+p3 = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Sample", 
+  colorBy = "cellColData", 
+  name = "log10(nFrags)",
+  plotAs = "ridges"
+)
+p3
+
+# 4. You can also display log10(unique nuclear fragments) in a violin plot.
+p4 = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Sample", 
+  colorBy = "cellColData", 
+  name = "log10(nFrags)",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p4
+```
+
+```{r save sample statistics plots2 2, warning=FALSE, message=FALSE, echo=FALSE}
+# Save plots as PDF
+plotPDF(p1,p2,p3,p4, 
+  name = "QC-Sample-Statistics_final_proj.pdf", 
+  ArchRProj = proj, 
+  addDOC = FALSE, 
+  width = 4, 
+  height = 4
+)
+```
+
+```{r final Dataset - visualization in UMAP embedding, message=FALSE, warning=FALSE}
+# Color by clusters
+p_clusters_final = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "cellColData", 
+  name = "Clusters", 
+  embedding = "UMAP", 
+  size = 0.5
+  )
+
+# Color by samples
+p_samples_final = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "cellColData", 
+  name = "Sample", 
+  embedding = "UMAP", 
+  size = 0.5
+  )
+
+# Plot
+ggAlignPlots(p_clusters_final, p_samples_final, type = "h")
+```
+
+```{r save UMAPs_final, warning=FALSE, message=FALSE, echo=FALSE}
+# Save as PDF
+plotPDF(p_clusters_final, p_samples_final,
+  name = "UMAP_final_clusters_samples_doubscore_nfrags.pdf", 
+  ArchRProj = proj, 
+  addDOC = FALSE, 
+  width = 5, 
+  height = 5
+)
+```
+
+```{r magic_final, warning=FALSE, message=FALSE}
+# Overlay gene scores on UMAP embedding of proj, use MAGIC smoothing
+# Get marker features
+markersGS_final = getMarkerFeatures(
+  ArchRProj = proj,
+  useMatrix = "GeneScoreMatrix",
+  groupBy = "Clusters",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  testMethod = "wilcoxon"
+)
+
+# Add impute weights
+proj = addImputeWeights(proj)
+
+# Plot
+magic_genes_final = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "GeneScoreMatrix", 
+  name = markerGenes, 
+  embedding = "UMAP",
+  plotAs = "points", 
+  imputeWeights = getImputeWeights(proj),
+  size = 0.5
+)
+
+# Plot all genes in cowplot
+magic_genes_cow_final = lapply(magic_genes_final, function(x){
+  x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+      axis.text.x=element_blank(), 
+      axis.ticks.x=element_blank(), 
+      axis.text.y=element_blank(), 
+      axis.ticks.y=element_blank()
+    )
+})
+do.call(cowplot::plot_grid, c(list(ncol = 4), magic_genes_cow_final))
+```
+
+```{r save magic UMAPs_final, warning=FALSE, message=FALSE, echo=FALSE}
+# Save
+plotPDF(plotList = magic_genes_final, 
+        name = "Plot-UMAP_final-MAGIC-Marker-Genes_proj.pdf", 
+        ArchRProj = proj, 
+        addDOC = FALSE, width = 5, height = 5)
+```
+
+```{r confusion matrix_final, warning=FALSE, message=FALSE}
+# These are my clusters with cell numbers
+cM_doubfilter = confusionMatrix(paste0(proj$Clusters), paste0(proj$Sample))
+cM_doubfilter
+
+# Visualize confusion matrix
+cM_doubfilter = cM_doubfilter / Matrix::rowSums(cM_doubfilter)
+p_cM_doubfilter = pheatmap::pheatmap(
+  mat = as.matrix(cM_doubfilter), 
+  color = paletteContinuous("whiteBlue"), 
+  border_color = "black"
+)
+p_cM_doubfilter
+```
+
+```{r save confusion matrix_final, warning=FALSE, message=FALSE, echo=FALSE}
+# Save confusion matrix as PDF
+plotPDF(p_cM_doubfilter, 
+  name = "confusion_matrix_doubfilter.pdf", 
+  ArchRProj = proj, 
+  addDOC = FALSE, 
+  width = 5, 
+  height = 5
+)
+```
+
+```{r save final ArchRProject proj, message=FALSE, warning=FALSE, echo=FALSE, include=FALSE, eval=FALSE}
+# Save ArchRProject
+saveArchRProject(proj, 
+  outputDirectory= "ArchRProject_final", 
+  overwrite = TRUE,
+  load = FALSE
+  )
+```
+
+```{r session info}
+sessionInfo()
+```
+
