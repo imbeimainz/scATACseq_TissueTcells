@@ -1,0 +1,1752 @@
+---
+title: "Using single-cell chromatin accessibility sequencing to characterize CD4+
+  T cells from murine tissues - downstream analysis\n"
+author: |
+  Kathrin Luise Braband, Annekathrin Silvia Nedwed, Sara Salome Helbich, Malte Simon, Niklas Beumer, Benedikt Brors, Federico Marini and Michael Delacher
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: yes
+    number_sections: yes
+  html_document:
+    toc: yes
+    toc_float: yes
+    code_folding: show
+    number_sections: yes
+    theme: lumen
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, include=FALSE}
+library(ArchR)
+library(tidyverse)
+library(dplyr)
+library(pheatmap)
+library(cowplot)
+library(SingleR)
+library(celldex)
+library(scRNAseq)
+library(biomaRt)
+library(scuttle)
+library(BSgenome.Mmusculus.UCSC.mm10)
+library(knitr)
+```
+
+```{r setInitialParameters}
+# Set seeds and initial parameters for ArchR
+RNGkind("L'Ecuyer-CMRG")
+set.seed(1)
+
+# Number of cores to use (adapt to your machine, but has to be > 1 otherwise 
+# plotTSSenrichment does not work properly)
+addArchRThreads(threads = 8)
+
+# Reference genome (adapt to your data, use the same reference that was used for 
+# the alignment)
+addArchRGenome("mm10")
+```
+
+```{r load ArchRProject proj, warning=FALSE, message=FALSE}
+# Load ArchRProject
+proj = loadArchRProject(
+  path = "ArchRProject_final", 
+  force = TRUE, 
+  showLogo = FALSE
+  )
+```
+
+# Final filtered dataset
+## Visualisation in UMAP embedding
+```{r final Dataset - visualization in UMAP embedding, message=FALSE, warning=FALSE}
+# Color by clusters
+p_clusters = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "cellColData", 
+  name = "Clusters", 
+  embedding = "UMAP", 
+  size = 0.5
+  )
+
+# Color by samples
+p_samples = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "cellColData", 
+  name = "Sample", 
+  embedding = "UMAP", 
+  size = 0.5
+  )
+
+plot_grid(p_clusters, p_samples, align = "h", ncol = 2)
+
+# Color by doublet enrichment score
+p_doubscore = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "cellColData", 
+  name = "DoubletScore", 
+  embedding = "UMAP", 
+  plotAs = "points", 
+  size = 0.5
+)
+
+p_doubenr=plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "cellColData", 
+  name = "DoubletEnrichment", 
+  embedding = "UMAP", 
+  plotAs = "points", 
+  size = 0.5
+)
+
+# Color by number of fragments per cell
+p_nfrags = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "cellColData", 
+  name = "nFrags", 
+  embedding = "UMAP", 
+  plotAs = "points", 
+  size = 0.5
+)
+
+# Plot
+plot_grid(p_doubscore, p_doubenr, p_nfrags, align = "h", ncol = 3, scale = 1.1)
+```
+
+```{r save UMAPs, warning=FALSE, message=FALSE, echo=FALSE}
+# Save as PDF
+plotPDF(p_clusters, p_samples, p_doubscore, p_doubenr, p_nfrags, 
+  name = "UMAP_clusters_samples_doubscore_nfrags.pdf", 
+  ArchRProj = proj, 
+  addDOC = FALSE, 
+  width = 5, 
+  height = 5
+)
+```
+
+# Cell type annotation
+## Manual cluster-based annotation using prior-knowledge marker genes
+```{r magic, warning=FALSE, message=FALSE}
+# Overlay gene scores on UMAP embedding, use MAGIC smoothing
+# Get marker features
+markersGS = getMarkerFeatures(
+  ArchRProj = proj, 
+  useMatrix = "GeneScoreMatrix", 
+  groupBy = "Clusters",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  testMethod = "wilcoxon"
+)
+
+# Define which genes to plot
+markerGenes = c("Cd4", "Il2ra", "Foxp3", "Batf", "Ccr8", "Ikzf2", "Rorc", "Tbx21", 
+  "Ifng", "Gata3", "Il2", "Sell")
+
+# Add impute weights
+proj = addImputeWeights(proj)
+
+# Plot
+magic_genes = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "GeneScoreMatrix", 
+  name = markerGenes, 
+  embedding = "UMAP",
+  plotAs = "points",
+  imputeWeights = getImputeWeights(proj),
+  size = 0.5
+)
+
+# Plot all genes in cowplot
+magic_genes_cow = lapply(magic_genes, function(x){
+  x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+      axis.text.x=element_blank(), 
+      axis.ticks.x=element_blank(), 
+      axis.text.y=element_blank(), 
+      axis.ticks.y=element_blank()
+    )
+})
+do.call(cowplot::plot_grid, c(list(ncol = 4), magic_genes_cow))
+
+# Save as PDF
+plotPDF(magic_genes_cow,  
+  name = "UMAP_genescores.pdf", 
+  ArchRProj = proj, 
+  addDOC = FALSE, 
+  width = 5, 
+  height = 5
+)
+```
+
+```{r markers as violin plots, message=FALSE, warning=FALSE}
+p_Cd4 = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Cd4",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Cd4
+
+p_Il2ra = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Il2ra",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Il2ra
+
+p_Foxp3 = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Foxp3",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Foxp3
+
+p_Batf = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Batf",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Batf
+
+p_Ccr8 = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Ccr8",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Ccr8
+
+p_Ikzf2 = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Ikzf2",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Ikzf2
+
+p_Rorc = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Rorc",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Rorc
+
+p_Tbx21 = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Tbx21",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Tbx21
+
+p_Ifng = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Ifng",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Ifng
+
+p_Gata3 = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Gata3",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Gata3
+
+p_Klrg1 = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Klrg1",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Klrg1
+
+p_Il2 = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Il2",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Il2
+```
+
+```{r final project: save violin plots, warning=FALSE, message=FALSE, echo=FALSE, eval=FALSE}
+# Save as PDF
+plotPDF(p_Cd4, p_Il2ra, p_Foxp3, p_Batf, p_Ccr8, p_Ikzf2, p_Rorc, p_Tbx21, p_Ifng, p_Gata3, p_Klrg1, p_Il2, 
+  name = "UMAP_final_violin.pdf", 
+  ArchRProj = proj, 
+  addDOC = FALSE, 
+  width = 5, 
+  height = 5
+)
+```
+
+```{r magic Tregs, message=FALSE, warning=FALSE}
+# Look at tissue Tregs and their precursor stages in the spleen
+markerGenes_treg = c("Foxp3", "Batf", "Nfil3", "Klrg1", "Gata3", "Il1rl1", "Id3", 
+  "Id2", "Ikzf2")
+
+# Plot
+magic_genes_treg = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "GeneScoreMatrix", 
+  name = markerGenes_treg, 
+  embedding = "UMAP",
+  plotAs = "points", 
+  imputeWeights = getImputeWeights(proj),
+  size = 0.5
+)
+
+# Plot all genes in cowplot
+magic_genes_cow_treg = lapply(magic_genes_treg, function(x){
+  x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+      axis.text.x=element_blank(), 
+      axis.ticks.x=element_blank(), 
+      axis.text.y=element_blank(), 
+      axis.ticks.y=element_blank()
+    )
+})
+do.call(cowplot::plot_grid, c(list(ncol = 3), magic_genes_cow_treg))
+```
+
+```{r save magic UMAPs Treg, warning=FALSE, message=FALSE, echo=FALSE, eval=FALSE}
+# Save
+plotPDF(plotList = magic_genes_treg, 
+        name = "Plot-UMAP_MAGIC-Treg-Genes_proj.pdf", 
+        ArchRProj = proj, 
+        addDOC = FALSE, width = 5, height = 5)
+```
+
+```{r treg markers as violin plots, message=FALSE, warning=FALSE}
+# To further characterize Treg cells in our dataset, we look at various Treg
+# markers
+p_Foxp3 = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Foxp3",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Foxp3
+
+p_Batf = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Batf",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Batf
+
+p_Nfil3 = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Nfil3",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Nfil3
+
+p_Klrg1 = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Klrg1",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Klrg1
+
+p_Gata3 = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Gata3",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Gata3
+
+p_Il1rl1 = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Il1rl1",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Il1rl1
+
+p_Id3 = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Id3",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Id3
+
+p_Id2 = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Id2",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Id2
+
+p_Ikzf2 = plotGroups(
+  ArchRProj = proj, 
+  groupBy = "Clusters", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Ikzf2",
+  plotAs = "violin",
+  alpha = 0.4,
+  addBoxPlot = TRUE
+)
+p_Ikzf2
+```
+
+```{r final project treg: save violin plots, warning=FALSE, message=FALSE, echo=FALSE, eval=FALSE}
+# Save as PDF
+plotPDF(p_Foxp3, p_Batf, p_Nfil3, p_Klrg1, p_Gata3, p_Il1rl1, p_Id3, p_Id2, p_Ikzf2, 
+  name = "UMAP_final_violin_treg_genes.pdf", 
+  ArchRProj = proj, 
+  addDOC = FALSE, 
+  width = 5, 
+  height = 5
+)
+```
+
+```{r define clusters, message=FALSE, warning=FALSE}
+# Define clusters for comparisons/ project subsetting (to be performed later)
+tisTreg_cluster = c("C8", "C12", "C14", "C15") #C8 spleen, C15 fat, C14 skin, C12 colon
+tTreg_cluster = c("C10", "C11") #C11 early precursor, C10 late precursor  
+pTreg_cluster = "C13"
+
+# Also scATAC_8 is from spleen, however this sample includes only CD25+ cells 
+# whereas all other samples are CD4+
+spleen = "scATAC_1" 
+skin = "scATAC_9"
+colon = "scATAC_4"
+fat = "scATAC_5"
+tissue = c(skin, colon, fat)
+```
+
+```{r rename clusters accordingly, message=FALSE, warning=FALSE, eval=FALSE}
+# Add cluster names to AchRProject
+clusters = as.data.frame(proj@cellColData$Clusters)
+colnames(clusters) = "V1"
+
+clusters = clusters %>% mutate(across("V1", str_replace, "^C8$", "C8 tisTreg spleen")) 
+clusters = clusters %>% mutate(across("V1", str_replace, "^C15$", "C15 tisTreg fat"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C14$", "C14 tisTreg skin"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C12$", "C12 tisTreg colon"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C13$", "C13 pTreg colon")) 
+clusters = clusters %>% mutate(across("V1", str_replace, "^C11$", "C11 early precursor spleen"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C10$", "C10 late precursor spleen"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C5$", "C5 naive CD4+ colon"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C4$", "C4 naive CD4+ spleen/fat"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C2$", "C2 naive CD4+ spleen"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C3$", "C3 naive CD4+ spleen"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C19$", "C19 Th1 skin"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C17$", "C17 Th1 colon"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C16$", "C16 Th1 spleen/fat"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C20$", "C20 Th17 skin"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C18$", "C18 Th2 colon"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C1$", "C1 undefined"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C6$", "C6 undefined"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C7$", "C7 undefined"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C9$", "C9 undefined"))
+
+clusters_vector = as.vector(clusters$V1)
+proj@cellColData$Clusters2 = clusters_vector
+```
+
+```{r celltype annotation, message=FALSE, warning=FALSE, eval=FALSE}
+# Add celltype annotation to AchRProject
+clusters = as.data.frame(proj@cellColData$Clusters)
+colnames(clusters) = "V1"
+
+clusters = clusters %>% mutate(across("V1", str_replace, "^C8$", "tisTreg")) 
+clusters = clusters %>% mutate(across("V1", str_replace, "^C15$", "tisTreg"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C14$", "tisTreg"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C12$", "tisTreg"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C13$", "pTreg")) 
+clusters = clusters %>% mutate(across("V1", str_replace, "^C11$", "tisTreg precursor"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C10$", "tisTreg precursor"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C5$", "naive CD4+"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C4$", "naive CD4+"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C2$", "naive CD4+"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C3$", "naive CD4+"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C19$", "Th1"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C17$", "Th1"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C16$", "Th1"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C20$", "Th17"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C18$", "Th2"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C1$", "undefined"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C6$", "undefined"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C7$", "undefined"))
+clusters = clusters %>% mutate(across("V1", str_replace, "^C9$", "undefined"))
+
+clusters_vector = as.vector(clusters$V1)
+proj@cellColData$Celltype = clusters_vector
+```
+
+```{r plot cell type annotation, message=FALSE, warning=FALSE}
+# Color by cell type
+p_celltype = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "cellColData", 
+  name = "Celltype", 
+  embedding = "UMAP", 
+  size = 0.5
+  )
+p_celltype
+```
+
+```{r save ArchRProject after cluster anno, message=FALSE, warning=FALSE, echo=FALSE, eval=FALSE}
+saveArchRProject(proj, 
+  outputDirectory= "ArchRProject_final", 
+  overwrite = TRUE,  
+  load = FALSE
+  )
+```
+
+## Reference data-based annotation using SingleR
+```{r Reference data-based annotation using SingleR, warning=FALSE, message=FALSE, eval=FALSE}
+# Reference data-based cell type annotation can be performed using SingleR.
+# SingleR can be used with built-in reference datasets (for available datasets see
+# (https://bioconductor.org/packages/release/bioc/vignettes/SingleR/inst/doc/SingleR.html))
+# or using a custom reference dataset. 
+# Reference dataset used: https://th-express.org
+
+# Get gene score matrix from ArchRProject
+GSM = getMatrixFromProject(
+  ArchRProj = proj,
+  useMatrix = "GeneScoreMatrix",
+  useSeqnames = NULL,
+  verbose = TRUE,
+  binarize = FALSE,
+  threads = getArchRThreads(),
+  logFile = createLogFile("getMatrixFromProject")
+)
+
+# Extract relevant matrix and add rownames
+GSM_matrix = assay(GSM)
+rownames(GSM_matrix) = GSM@elementMetadata$name
+
+# Get cell annotation reference
+ref_data_stubbington = readRDS("Data/SingleR_refdata/singler_ref_stubbington_CD4.RDS")
+
+ref_data_immgen = ImmGenData()
+ref_data_immgen = ref_data_immgen[, ref_data_immgen$label.main %in% c("T cells") ]
+
+# Annotate
+GSM_stubbington = SingleR(
+  test = GSM_matrix, 
+  assay.type.test = 1,
+  ref = ref_data_stubbington,
+  labels = ref_data_stubbington$label.fine
+)
+
+table(predicted=GSM_stubbington$labels)
+
+GSM_immgen = SingleR(
+  test = GSM_matrix, 
+  assay.type.test = 1,
+  ref = ref_data_immgen,
+  labels = ref_data_immgen$label.fine
+)
+
+table(predicted=GSM_immgen$labels)
+
+# Add annotations to ArchRProject
+proj@cellColData$pred_celltype_stubbington = GSM_stubbington$labels
+proj@cellColData$pred_celltype_immgen = GSM_immgen$labels
+```
+
+```{r plotting SingleR cluster annotation, warning=FALSE, message=FALSE}
+# Overlay annotations on UMAP
+p_stubbington = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "cellColData", 
+  name = "pred_celltype_stubbington", 
+  embedding = "UMAP", 
+  plotAs = "points", 
+  size = 0.5
+)
+p_stubbington
+
+p_immgen = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "cellColData", 
+  name = "pred_celltype_immgen", 
+  embedding = "UMAP", 
+  plotAs = "points", 
+  size = 0.5
+)
+p_immgen
+```
+
+```{r save SingleR cluster annotation, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Save
+plotPDF(p_stubbington, p_immgen,
+  name = "SingleR_stubbington_immgen.pdf", 
+  ArchRProj = proj, 
+  addDOC = FALSE, 
+  width = 5, 
+  height = 5
+)
+```
+
+# Pseudo-bulk replicates
+```{r review clusters with cell numbers, message=FALSE, warning=FALSE}
+# We have a look at the number of cells in the individual clusters
+cM_doubfilter = confusionMatrix(paste0(proj$Clusters2), paste0(proj$Sample))
+cM_doubfilter
+```
+
+```{r make pseudo-bulk replicates, message=FALSE, warning=FALSE, eval=FALSE}
+# The key parameter here is groupBy, which defines the groups for which 
+# pseudo-bulk replicates should be made
+proj = addGroupCoverages(
+  ArchRProj = proj,
+  groupBy = "Clusters2",
+  minCells = 40, 
+  maxCells = 500, 
+  minReplicates = 2,
+  maxReplicates = 5, 
+  sampleRatio = 0.8,
+  force = TRUE
+  )
+```
+
+```{r save ArchRProject after computing pseudobulk replicates, message=FALSE, warning=FALSE, echo=FALSE, eval=FALSE}
+saveArchRProject(proj, 
+  outputDirectory= "ArchRProject_final", 
+  overwrite = TRUE,  
+  load = FALSE
+  )
+```
+
+# Peak-calling
+```{r peak calling, eval=FALSE, message=FALSE, warning=FALSE, error=TRUE}
+# You can use the following function to search the path to Macs2
+# However, sometimes this might not work and you have to manually add the path 
+# like it is shown in the second line. 
+pathToMacs2 = findMacs2()
+# If you manually add the path, you have to change this line!
+pathToMacs2 = "../../../../Macs2/bin/macs2"
+
+proj = addReproduciblePeakSet(
+  ArchRProj = proj, 
+  groupBy = "Clusters2", 
+  pathToMacs2 = pathToMacs2
+)
+```
+
+```{r add peak matrix to ArchRProject, message=FALSE, warning=FALSE, eval=FALSE}
+# Add peak matrix to ArchRProject
+proj = addPeakMatrix(proj)
+
+# Confirm that peak matrix has been added
+getAvailableMatrices(proj)
+```
+
+```{r save ArchRProject post peak-calling, message=FALSE, warning=FALSE, echo=FALSE, eval=FALSE}
+saveArchRProject(proj, 
+  outputDirectory= "ArchRProject_final", 
+  overwrite = TRUE,  
+  load = FALSE
+  )
+```
+
+## Tissue signatures
+### Import tissue signatures
+```{r custom enrichment - tissue signatures, message=FALSE, warning=FALSE, eval=FALSE}
+# Check for enrichment of Treg signatures in Clusters
+# signatures from PMID:33789089
+
+signature_names = c("early_progenitor_tisTreg","late_progenitor_tisTreg","tisTreg_core",
+  "tisTreg_skin","tisTreg_VAT","tisTreg_colon")
+granges_list = list()
+n = 1
+
+for (x in signature_names){
+  filename = paste("Data/signatures/",x,".csv", sep = "")
+  sig_csv = read.csv(filename, sep = "-", header = FALSE)
+  sig_csv = data.frame(seqnames=sig_csv[,1], start=as.character(sig_csv[,2]), end=as.character(sig_csv[,3]))
+  granges_list[[n]] = makeGRangesFromDataFrame(sig_csv, seqnames.field="seqnames", 
+  start.field="start", end.field="end")
+  n = n+1
+}
+
+early_progenitor_tisTreg_GR = granges_list[[1]]
+late_progenitor_tisTreg_GR = granges_list[[2]]
+tisTreg_core_GR = granges_list[[3]]
+tisTreg_skin_GR = granges_list[[4]]
+tisTreg_VAT_GR = granges_list[[5]]
+tisTreg_colon_GR = granges_list[[6]]
+```
+
+### Calculate signatures scores
+```{r calculate signatures scores, message=FALSE, warning=FALSE, eval=FALSE}
+# Signature z-scores can be calculated via the 'addDeviationsMatrix' function 
+# of the chromVAR package. This wrapper function accepts the ArchRProject, the 
+# GRanges objects with my signatures as a list, and the name for the signature 
+# set as a string. The output is the ArchRProject with the z-scores and 
+# deviation-scores added as additional columns to cellColData (one column for 
+# each signature).
+
+archr_add_peak_signatures = function(project, signature_list, signature_name){
+  #signature_list: list of granges
+  #signature_name: name string for the set of signatures
+    add_df_to_cellcoldata = function(pro, pheno_df, force=FALSE){
+      stopifnot(identical(rownames(pro@cellColData), rownames(pheno_df)))
+      cnames = colnames(pheno_df)
+      for(i in 1:ncol(pheno_df)){
+        pro = addCellColData(ArchRProj = pro, data=pheno_df[, i], name = cnames[i],
+                         cells = rownames(pro@cellColData), force = force)
+      }
+      return(pro)
+    }
+ if(length(signature_list)<2){
+    stop('Currently, only works if at least two signatures are provided')
+  }
+  for(i in seq_along(signature_list)){
+    names(signature_list[[i]]) = NULL
+  }
+  project = addPeakAnnotations(ArchRProj = project, 
+                             regions = signature_list,
+                             name = signature_name,
+                             force=T)
+
+  method_use = "chromVAR" #does only work with fixed width peaks
+  if(any(sapply(signature_list, function(x) length(unique(width(x)))) > 1)){
+     method_use = 'ArchR'
+  }
+  
+  project = addBgdPeaks(project, force = T, method=method_use)
+  
+  project = addDeviationsMatrix(
+    ArchRProj = project, 
+    peakAnnotation = signature_name,
+    binarize=TRUE,
+    bgdPeaks = getBgdPeaks(project, method = method_use),
+    force = TRUE
+  )
+  
+  dr_df = as.data.frame(project@cellColData)
+  sig_se = getMatrixFromProject(project, paste0(signature_name, 'Matrix'))
+  z_score_mat = t(assays(sig_se)[['z']])
+  z_score_mat = z_score_mat[match(rownames(dr_df),rownames(z_score_mat)), ]
+  colnames(z_score_mat) = paste0('z_', colnames(z_score_mat))
+  stopifnot(identical(rownames(z_score_mat), rownames(dr_df)))
+  dev_score_mat = t(assays(sig_se)[['deviations']])
+  dev_score_mat = dev_score_mat[match(rownames(dr_df),rownames(dev_score_mat)), ]
+  colnames(dev_score_mat) = paste0('dev_', colnames(dev_score_mat))
+  stopifnot(identical(rownames(dev_score_mat), rownames(dr_df)))
+  
+  project = add_df_to_cellcoldata(project, z_score_mat, force=T)
+  project = add_df_to_cellcoldata(project, dev_score_mat, force=T)
+  return(project)
+}
+
+signature_list = list(early_progenitor_tisTreg_sig = early_progenitor_tisTreg_GR, 
+  late_progenitor_tisTreg_sig = late_progenitor_tisTreg_GR, 
+  tisTreg_core_sig = tisTreg_core_GR, 
+  tisTreg_skin_sig = tisTreg_skin_GR, 
+  tisTreg_VAT_sig = tisTreg_VAT_GR, 
+  tisTreg_colon_sig = tisTreg_colon_GR 
+)
+
+proj = archr_add_peak_signatures(proj, signature_list, "signatures")
+```
+
+```{r save ArchRProject after adding z- and dev-scores for signatures, message=FALSE, warning=FALSE, echo=FALSE, eval=FALSE}
+# Save ArchRProject
+saveArchRProject(proj, 
+  outputDirectory= "ArchRProject_final", 
+  overwrite = TRUE,  
+  load = FALSE
+  )
+```
+
+```{r overlay signatures on UMAP embedding, message=FALSE, warning=FALSE}
+# Overlay signatures on UMAP
+p_early_progenitor_tisTreg_sig = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "cellColData", 
+  name = "z_early_progenitor_tisTreg_sig", 
+  embedding = "UMAP",
+  plotAs = "points",
+  size = 0.5
+  )
+
+p_late_progenitor_tisTreg_sig = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "cellColData", 
+  name = "z_late_progenitor_tisTreg_sig", 
+  embedding = "UMAP",
+  plotAs = "points",
+  size = 0.5
+  )
+
+p_tisTreg_core_sig = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "cellColData", 
+  name = "z_tisTreg_core_sig", 
+  embedding = "UMAP",
+  plotAs = "points",
+  size = 0.5
+  )
+
+p_tisTreg_skin_sig = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "cellColData", 
+  name = "z_tisTreg_skin_sig", 
+  embedding = "UMAP",
+  plotAs = "points",
+  size = 0.5
+  )
+
+p_tisTreg_VAT_sig = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "cellColData", 
+  name = "z_tisTreg_VAT_sig", 
+  embedding = "UMAP",
+  plotAs = "points",
+  size = 0.5
+  )
+
+p_tisTreg_colon_sig = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "cellColData", 
+  name = "z_tisTreg_colon_sig", 
+  embedding = "UMAP",
+  plotAs = "points",
+  size = 0.5
+  )
+
+# Plot
+ggAlignPlots(p_early_progenitor_tisTreg_sig, p_late_progenitor_tisTreg_sig, 
+  p_tisTreg_core_sig, type = "h")
+ggAlignPlots(p_tisTreg_skin_sig, p_tisTreg_VAT_sig, p_tisTreg_colon_sig, type = "h")
+```
+
+```{r save p_tisTreg_sig p_Tfh_sig p_tisCD8_sig, message=FALSE, warning=FALSE, echo=FALSE}
+# Save:
+plotPDF(p_early_progenitor_tisTreg_sig, p_late_progenitor_tisTreg_sig, p_tisTreg_core_sig, p_tisTreg_skin_sig, p_tisTreg_VAT_sig, p_tisTreg_colon_sig,
+  name = "UMAP_signatures.pdf", 
+  ArchRProj = proj, 
+  addDOC = FALSE, 
+  width = 5, 
+  height = 5
+  )
+```
+
+## Identifying marker peaks
+### Identifying marker peaks grouped by clusters
+```{r identifying marker peaks (grouped by clusters), message=FALSE, warning=FALSE, results='hide'}
+# Identify marker peaks (differential peaks) between clusters (cell types):
+markersPeaks = getMarkerFeatures(
+  ArchRProj = proj, 
+  useMatrix = "PeakMatrix", 
+  groupBy = "Clusters2",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  testMethod = "wilcoxon"
+)
+
+# Retrieve particular slices of this SummarizedExperiment that we are interested
+# in: The default behavior of this function is to return a list of DataFrame 
+# objects, one for each cell group
+markerList = getMarkers(markersPeaks, cutOff = "FDR <= 0.01 & Log2FC >= 1")
+
+# Instead of a list of DataFrame objects, we can use getMarkers() to return a 
+# GRangesList object by setting returnGR = TRUE
+markerList2 = getMarkers(markersPeaks, cutOff = "FDR <= 0.01 & Log2FC >= 1", returnGR = TRUE)
+
+# Plot marker peaks as heatmap
+heatmapPeaks = plotMarkerHeatmap(
+  seMarker = markersPeaks, 
+  cutOff = "FDR <= 0.001 & Log2FC >= 3",
+  transpose = FALSE,
+)
+```
+
+```{r plot markerpeaks in heatmap, error=TRUE, message=FALSE, warning=FALSE}
+# Plot this heatmap using draw()
+heatmap_peaks = ComplexHeatmap::draw(heatmapPeaks, 
+  heatmap_legend_side = "right"
+)
+```
+
+```{r save marker peak heatmaps by clusters, message=FALSE, warning=FALSE, echo=FALSE}
+# Save as PDF
+plotPDF(heatmap_peaks, 
+  name = "Peak-Marker-Heatmap", 
+  width = 8, 
+  height = 6, 
+  ArchRProj = proj, 
+  addDOC = FALSE
+)
+```
+
+## Pairwise testing between groups
+### Pairwise testing between tisTreg and Treg clusters
+```{r pairwise testing between clusters, warning=FALSE, message=FALSE}
+# Get differential peaks between tisTreg and Treg cell clusters
+markerTest = getMarkerFeatures(
+  ArchRProj = proj, 
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = tisTreg_cluster,
+  bgdGroups = tTreg_cluster
+)
+
+# Visualize as volcano plot:
+pv2 = markerPlot(seMarker = markerTest,
+  name = tisTreg_cluster, 
+  cutOff = "FDR <= 0.1 & abs(Log2FC) >= 1", 
+  plotAs = "Volcano"
+)
+
+pv2
+```
+
+```{r pairwise testing betw clusters - save pv, message=FALSE, warning=FALSE, echo=FALSE}
+# save as PDF:
+plotPDF(pv2, 
+  name = "tisTreg-vs-Treg-Markers-Volcano", 
+  width = 5, 
+  height = 5, 
+  ArchRProj = proj, 
+  addDOC = FALSE
+)
+```
+
+# Motif enrichment
+## Add motif annotations
+```{r add MotifMatrix, warning=FALSE, message=FALSE, eval=FALSE}
+# Look for motifs that are enriched in peaks that are up or down in various cell
+# types
+# We must first add these motif annotations to our ArchRProject; this 
+# effectively creates a binary matrix where the presence of a motif in each peak
+# is indicated numerically
+proj = addMotifAnnotations(ArchRProj = proj, motifSet = "cisbp", name = "Motif")
+```
+
+```{r save ArchRProject after adding motif annotations, message=FALSE, warning=FALSE, echo=FALSE, eval=FALSE}
+# Save ArchRProject
+saveArchRProject(proj, 
+  outputDirectory= "ArchRProject_final", 
+  overwrite = FALSE,  
+  load=F
+  )
+```
+
+## Motif enrichment in marker peaks
+### Motif enrichment in marker peaks grouped by clusters
+```{r motif enrichment by clusters, warning=FALSE, message=FALSE, error=TRUE}
+# We perform motif enrichment on our marker peaks 
+# In this dataset we used more strict thresholds for the FDR and Log2FC 
+# because of the size of the data; otherwise plots could not be generated.
+enrichMotifs = peakAnnoEnrichment(
+  seMarker = markersPeaks, 
+  ArchRProj = proj,
+  peakAnnotation = "Motif",
+  cutOff = "FDR <= 0.001 & Log2FC >= 2"
+)
+
+# Plot these motif enrichments across all cell groups
+heatmapEM = plotEnrichHeatmap(enrichMotifs, 
+  n = 10, 
+  transpose = TRUE
+)
+
+# Visualize
+row_order = c("C5 naive CD4+ colon", "C4 naive CD4+ spleen/fat", "C2 naive CD4+ spleen", 
+  "C3 naive CD4+ spleen", "C11 early precursor spleen", "C10 late precursor spleen", 
+  "C8 tisTreg spleen", "C15 tisTreg fat", "C14 tisTreg skin", "C12 tisTreg colon", 
+  "C13 pTreg colon", "C20 Th17 skin", "C16 Th1 spleen/fat", "C17 Th1 colon", "C19 Th1 skin", 
+  "C18 Th2 colon", "C1 undefined", "C6 undefined", "C7 undefined", "C9 undefined")
+
+heatmapEM2 = ComplexHeatmap::draw(heatmapEM, 
+  heatmap_legend_side = "bot", 
+  annotation_legend_side = "bot",
+  row_order = row_order
+)
+```
+
+```{r save motif enrichment heatmap by clusters, message=FALSE, warning=FALSE, echo=FALSE, error=TRUE}
+# Save as PDF
+plotPDF(heatmapEM2, 
+  name = "Motifs-Enriched-Marker-Heatmap", 
+  width = 8, 
+  height = 6, 
+  ArchRProj = proj, 
+  addDOC = FALSE
+)
+```
+
+## Motif enrichment in differential peaks
+### Motif enrichment in differential peaks between tisTreg and Treg clusters
+```{r motif enrichment in differential peaks between clusters, warning=FALSE, message=FALSE, error=TRUE}
+# Define the set of significantly differential peaks that we are interested in 
+# Create SummarizedExperiment object
+motifsUp = peakAnnoEnrichment(
+  seMarker = markerTest,
+  ArchRProj = proj,
+  peakAnnotation = "Motif", 
+  cutOff = "FDR <= 0.1 & Log2FC >= 0.5"
+)
+
+# Prepare data for plotting with ggplot
+# Create a simplified data.frame object containing the motif names, the corrected 
+# p-values, and the significance rank
+df_up = data.frame(TF = rownames(motifsUp), mlog10Padj = assay(motifsUp)[,1])
+df_up = df_up[order(df_up$mlog10Padj, decreasing = TRUE),]
+df_up$rank = seq_len(nrow(df_up))
+
+# Plot rank-sorted TF motifs and color them by significance of their enrichment
+ggUp = ggplot(df_up, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+    data = df_up[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+    size = 1.5,
+    nudge_x = 2,
+    color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(P-adj) Motif Enrichment") + 
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet")
+)
+ggUp
+
+# Perform the same analyses for the peaks that are more accessible in the Treg 
+# compared to tisTreg by using peaks with Log2FC <= -0.5
+motifsDo = peakAnnoEnrichment(
+  seMarker = markerTest,
+  ArchRProj = proj,
+  peakAnnotation = "Motif",
+  cutOff = "FDR <= 0.1 & Log2FC <= -0.5"
+)
+
+df_do = data.frame(TF = rownames(motifsDo), mlog10Padj = assay(motifsDo)[,1])
+df_do = df_do[order(df_do$mlog10Padj, decreasing = TRUE),]
+df_do$rank = seq_len(nrow(df_do))
+
+ggDo = ggplot(df_do, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+    data = df_do[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+    size = 1.5,
+    nudge_x = 2,
+    color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(FDR) Motif Enrichment") +
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet")
+)
+ggDo
+```
+
+```{r save ggUp ggDo, message=FALSE, warning=FALSE, echo=FALSE, error=TRUE}
+# save as PDF:
+plotPDF(ggUp, ggDo, 
+  name = "tisTreg-vs-Treg-Motifs-Enriched", 
+  width = 5, 
+  height = 5, 
+  ArchRProj = proj, 
+  addDOC = FALSE
+)
+```
+
+# ChromVAR deviations enrichment
+ChromVAR is designed for computing accessibility scores for transcription factor motifs on a **per-cell basis** from sparse chromatin accessibility data
+
+## Add motif deviations
+```{r add background peaks and motif deviations matrix, message=FALSE, warning=FALSE, eval=FALSE}
+# Add a set of background peaks; sample peaks based on similarity in GC-content 
+# and nFrags across all samples using the Mahalanobis distance
+proj = addBgdPeaks(proj, force = T)
+
+# Compute per-cell deviations across all of our motif annotations
+proj = addDeviationsMatrix(
+  ArchRProj = proj,
+  peakAnnotation = "Motif",
+  force = TRUE
+)
+```
+
+```{r save ArchRProject after calculating motif deviations, message=FALSE, warning=FALSE, echo=FALSE, eval=FALSE}
+# Save ArchRProject
+saveArchRProject(proj, 
+  outputDirectory= "ArchRProject_final", 
+  overwrite = T,  
+  load=F
+  )
+```
+
+```{r motif deviations, warning=FALSE, message=FALSE}
+# Access deviations
+# If we want this function to return a ggplot object, we set plot = TRUE 
+# otherwise, this function would return the DataFrame object.
+plotVarDev = getVarDeviations(proj, name = "MotifMatrix", plot = TRUE)
+
+# plot variable deviations:
+plotVarDev
+```
+
+```{r save plotVarDev, message=FALSE, warning=FALSE, echo=FALSE}
+# Save plot as PDF
+plotPDF(plotVarDev, 
+  name = "Variable-Motif-Deviation-Scores", 
+  width = 5, 
+  height = 5, 
+  ArchRProj = proj, 
+  addDOC = FALSE
+)
+```
+
+## Plot the distribution of motifs in the clusters
+```{r subset motifs for downstream analysis, warning=FALSE, message=FALSE, error=TRUE}
+# If we want to extract a subset of motifs for downstream analysis,
+# we can do this using the getFeatures() function.
+motifs = c("Batf")
+markerMotifs = getFeatures(proj, select = paste(motifs, collapse="|"), useMatrix = "MotifMatrix")
+markerMotifs
+
+# Exclude Batf3
+markerMotifs = grep("z:", markerMotifs, value = TRUE)
+markerMotifs = markerMotifs[markerMotifs %ni% "z:Batf3_789"]
+markerMotifs
+
+# We supply the impute weights that we calculated previously during our gene 
+# score analyses (impute weights allow us to smooth the signal across nearby 
+# cells, helpful in the context of our sparse scATAC-seq data).
+
+# First, re-run addImputeWeights (subset cells from the original imputation)
+proj = addImputeWeights(proj)
+
+# Then, plot distribution of chromVAR deviation scores
+p_zscore = plotGroups(ArchRProj = proj, 
+  groupBy = "Clusters", 
+  colorBy = "MotifMatrix", 
+  name = markerMotifs,
+  imputeWeights = getImputeWeights(proj)
+)
+
+p_zscore
+```
+
+```{r save p_zscore, message=FALSE, warning=FALSE, echo=FALSE}
+# Save plot as PDF
+plotPDF(p_zscore, 
+  name = "Plot-Groups-Deviations-w-Imputation", 
+  width = 5, 
+  height = 5, 
+  ArchRProj = proj, 
+  addDOC = FALSE
+)
+```
+
+## Overlay motif z-score and corresponding gene score on UMAP
+```{r overlay z-scores on UMAP embedding, message=FALSE, warning=FALSE}
+# Instead of looking at the distributions of these z-scores, we can overlay the 
+# z-scores on our UMAP embedding as we’ve done previously for gene scores.
+# Overlay z-scores
+p_zscore_UMAP_Batf = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "MotifMatrix", 
+  name = "z:Batf_790", 
+  embedding = "UMAP",
+  plotAs = "points",
+  imputeWeights = getImputeWeights(proj),
+  size = 0.5
+)
+
+p_gene_exp_UMAP_Batf = plotEmbedding(
+  ArchRProj = proj, 
+  colorBy = "GeneScoreMatrix", 
+  name = "Batf", 
+  embedding = "UMAP",
+  plotAs = "points",
+  imputeWeights = getImputeWeights(proj),
+  size = 0.5
+)
+
+plot_grid(p_zscore_UMAP_Batf, p_gene_exp_UMAP_Batf, align = "h", ncol = 2)
+```
+
+```{r save UMAP Batf z-score and gene score overlay, warning=FALSE, message=FALSE, echo=FALSE, eval=FALSE}
+# Save plot as PDF
+plotPDF(p_zscore_UMAP_Batf, p_gene_exp_UMAP_Batf,
+        name = "UMAP_Batf_motif-z-score_genescore.pdf", 
+        ArchRProj = proj, 
+        addDOC = FALSE, width = 5, height = 5)
+```
+
+# Motif footprinting
+```{r motif footprinting, message=FALSE, warning=FALSE, error=TRUE}
+# Obtain the positions of the relevant motifs
+motifPositions = getPositions(proj, name = "Motif") 
+motifPositions
+
+# This creates a GRangesList object where each TF motif is represented by a 
+# separate GRanges object. We can subset this GRangesList to a few TF motifs 
+# that we are interested in.
+motifs_fp = c("Batf", "Tbx21", "Gata3", "Rorc", "Rora", "Foxp3", "Ikzf2")
+markerMotifs_fp = unlist(lapply(motifs_fp, function(x) grep(x, names(motifPositions), value = TRUE)))
+markerMotifs_fp
+
+# Exclude Batf3
+markerMotifs_fp = markerMotifs_fp[markerMotifs_fp %ni% "Batf3_789"]
+markerMotifs_fp
+
+# To accurately profile TF footprints, a large number of reads is required. 
+# Therefore we will use the pseudobulk data stored as group coverages calculated above.
+
+# Compute footprints for the subset of marker motifs defined above
+seFoot = getFootprints(
+  ArchRProj = proj, 
+  positions = motifPositions[markerMotifs_fp], 
+  groupBy = "Clusters2"
+)
+```
+
+## Motif footprinting in Treg cells
+```{r subset project to Tregs, warning=FALSE, message=FALSE, eval=FALSE}
+# Subset proj (with all matrices added) to only Treg cells
+proj_treg = proj[(proj@cellColData@listData[["Clusters"]] %in% c(tisTreg_cluster,tTreg_cluster)), ] 
+```
+
+```{r save ArchRProject proj_treg, message=FALSE, warning=FALSE, echo=FALSE, eval=FALSE}
+saveArchRProject(proj_treg, 
+  outputDirectory= "ArchRProject_Treg", 
+  overwrite = TRUE,  
+  load = FALSE
+  )
+```
+
+```{r LSI, clustering, UMAP, message=FALSE, warning=FALSE, eval=FALSE}
+# LSI dimensional reduction
+proj_treg = addIterativeLSI(
+  ArchRProj = proj_treg,
+  useMatrix = "TileMatrix",
+  name = "IterativeLSI",
+  iterations = 2, 
+  clusterParams = list( 
+    resolution = c(0.2), 
+    sampleCells = 10000, 
+    n.start = 10 
+  ),
+  varFeatures = 25000, 
+  dimsToUse = 1:30,
+  force = TRUE
+)
+
+# Clustering
+proj_treg = addClusters(
+  input = proj_treg,
+  reducedDims = "IterativeLSI",
+  method = "Seurat",
+  name = "Clusters",
+  resolution = 0.8, 
+  force = TRUE
+)
+
+# Add UMAP embedding
+proj_treg = addUMAP(
+  ArchRProj = proj_treg, 
+  reducedDims = "IterativeLSI", 
+  name = "UMAP", 
+  nNeighbors = 30, 
+  minDist = 0.5, 
+  metric = "cosine", 
+  force = TRUE
+)
+```
+
+```{r add group coverages, message=FALSE, warning=FALSE, eval=FALSE}
+# The key parameter here is groupBy, which defines the groups for which 
+# pseudo-bulk replicates should be made.
+proj_treg = addGroupCoverages(
+  ArchRProj = proj_treg,
+  groupBy = "Clusters2",
+  minCells = 40, 
+  maxCells = 500, #standard
+  minReplicates = 2, #standard
+  maxReplicates = 5, #standard
+  sampleRatio = 0.8,
+  force = TRUE
+  )
+```
+
+```{r save ArchRProject proj_treg 2, message=FALSE, warning=FALSE, echo=FALSE, eval=FALSE}
+saveArchRProject(proj_treg, 
+  outputDirectory= "ArchRProject_Treg", 
+  overwrite = TRUE,  
+  load = FALSE
+  )
+```
+
+```{r load ArchRProject proj_treg, message=FALSE, warning=FALSE, include=FALSE}
+# Load ArchRProject
+proj_treg = loadArchRProject(
+  path = "ArchRProject_Treg", 
+  force = TRUE, 
+  showLogo = FALSE
+  )
+```
+
+```{r motif footprinting treg, message=FALSE, warning=FALSE, error=TRUE}
+# Obtain the positions of the relevant motifs
+motifPositions = getPositions(proj_treg, name = "Motif") 
+motifPositions
+
+# This creates a GRangesList object where each TF motif is represented by a 
+# separate GRanges object. We can subset this GRangesList to a few TF motifs 
+# that we are interested in.
+motifs_fp = c("Batf", "Tbx21", "Gata3", "Rorc", "Rora", "Foxp3", "Ikzf2")
+markerMotifs_fp = unlist(lapply(motifs_fp, function(x) grep(x, names(motifPositions), value = TRUE)))
+markerMotifs_fp
+
+# Exclude Batf3
+markerMotifs_fp = markerMotifs_fp[markerMotifs_fp %ni% "Batf3_789"]
+markerMotifs_fp
+
+# To accurately profile TF footprints, a large number of reads is required. 
+# Therefore we will use the pseudobulk data stored as group coverages calculated above.
+
+# Compute footprints for the subset of marker motifs defined above
+seFoot_treg = getFootprints(
+  ArchRProj = proj_treg, 
+  positions = motifPositions[markerMotifs_fp], 
+  groupBy = "Clusters2"
+)
+```
+
+## Normalization of footprints
+### Normalization by subtraction of the Tn5 bias
+```{r normalization by subtraction, message=FALSE, warning=FALSE, error=TRUE}
+plotFootprints(
+  seFoot = seFoot,
+  ArchRProj = proj, 
+  normMethod = "Subtract",
+  plotName = "Footprints-Subtract-Bias",
+  addDOC = FALSE,
+  smoothWindow = 5
+)
+```
+
+```{r normalization by subtraction 2, message=FALSE, warning=FALSE, error=TRUE}
+plotFootprints(
+  seFoot = seFoot_treg,
+  ArchRProj = proj_treg, 
+  normMethod = "Subtract",
+  plotName = "Footprints-Subtract-Bias_Treg",
+  addDOC = FALSE,
+  smoothWindow = 5
+)
+```
+
+```{r}
+knitr::include_graphics("./ArchRProject_Treg/Plots/Footprints-Subtract-Bias_Treg.pdf")
+```
+
+### Normalization by dividing by the Tn5 bias
+```{r normalization by division, message=FALSE, warning=FALSE, error=TRUE}
+plotFootprints(
+  seFoot = seFoot,
+  ArchRProj = proj, 
+  normMethod = "Divide",
+  plotName = "Footprints-Divide-Bias",
+  addDOC = FALSE,
+  smoothWindow = 5
+)
+```
+
+```{r normalization by division 2, message=FALSE, warning=FALSE, error=TRUE}
+plotFootprints(
+  seFoot = seFoot_treg,
+  ArchRProj = proj_treg, 
+  normMethod = "Divide",
+  plotName = "Footprints-Divide-Bias_Treg",
+  addDOC = FALSE,
+  smoothWindow = 5
+)
+```
+
+```{r}
+knitr::include_graphics("./ArchRProject_Treg/Plots/Footprints-Divide-Bias_Treg.pdf")
+```
+
+### Footprinting without normalization for the Tn5 bias
+```{r without normalization, message=FALSE, warning=FALSE, error=TRUE}
+plotFootprints(
+  seFoot = seFoot,
+  ArchRProj = proj, 
+  normMethod = "None",
+  plotName = "Footprints-No-Normalization",
+  addDOC = FALSE,
+  smoothWindow = 5
+)
+```
+
+```{r without normalization 2, message=FALSE, warning=FALSE, error=TRUE}
+plotFootprints(
+  seFoot = seFoot_treg,
+  ArchRProj = proj_treg, 
+  normMethod = "None",
+  plotName = "Footprints-No-Normalization_Treg",
+  addDOC = FALSE,
+  smoothWindow = 5
+)
+```
+
+```{r}
+knitr::include_graphics("./ArchRProject_Treg/Plots/Footprints-No-Normalization_Treg.pdf")
+```
+
+# Co-accessibility analysis
+```{r co-accessibility analysis, message=FALSE, warning=FALSE, eval=FALSE}
+# Co-accessibility is a correlation in accessibility between two peaks 
+# across many single cells. Calculate co-accessibility
+proj = addCoAccessibility(
+    ArchRProj = proj,
+    reducedDims = "IterativeLSI"
+)
+
+# Retrieve co-accessibility information via the getCoAccessibility() function
+# Increase resolution to plot fewer co-accessibility interactions
+# if returnLoops = FALSE, then the function will return a dataframe instead of 
+# a loop track
+cA = getCoAccessibility(
+    ArchRProj = proj,
+    corCutOff = 0.5,
+    resolution = 10000, 
+    returnLoops = TRUE 
+)
+
+# Plot browser tracks of co-accessibility for our marker genes
+markerGenes = c("Cd4", "Il2ra", "Foxp3", "Batf", "Ccr8", "Ikzf2", "Rorc", "Tbx21", "Ifng", "Gata3", "Il2", "Sell")
+
+p_cA = plotBrowserTrack(
+    ArchRProj = proj, 
+    groupBy = "Clusters", 
+    geneSymbol = markerGenes, 
+    upstream = 50000,
+    downstream = 50000,
+    loops = getCoAccessibility(proj)
+)
+
+# To plot the browser track select a specific marker gene using the $ accessor
+grid::grid.newpage()
+grid::grid.draw(p_cA$Batf)
+```
+
+```{r save p_cA, message=FALSE, warning=FALSE, results='hide', echo=FALSE, eval=FALSE}
+# Save plot as PDF
+plotPDF(plotList = p_cA, 
+    name = "Plot-Tracks-Marker-Genes-with-CoAccessibility.pdf", 
+    ArchRProj = proj, 
+    addDOC = FALSE, 
+    width = 5, 
+    height = 5
+)
+```
+
+# Trajectory analysis
+## ArchR's implementation
+```{r trajectory analysis, message=FALSE, warning=FALSE, results='hide', error=TRUE, eval=FALSE}
+# Create user-defined trajectory backbone from early via late progenitors to
+# tissue Treg cells in the respective non-lymphoid tissue
+Treg_trajectory_VAT = c("C11", "C10", "C8", "C15")
+Treg_trajectory_skin = c("C11", "C10", "C8", "C14")
+Treg_trajectory_colon = c("C11", "C10", "C8", "C12")
+
+# Create the trajectory
+# This creates a new column in cellColData that stores the pseudo-time value for 
+# each cell in the trajectory
+proj = addTrajectory(
+    ArchRProj = proj, 
+    name = "Treg_trajectory_VAT", 
+    groupBy = "Clusters",
+    trajectory = Treg_trajectory_VAT, 
+    embedding = "UMAP", 
+    force = TRUE
+)
+
+proj = addTrajectory(
+    ArchRProj = proj, 
+    name = "Treg_trajectory_skin", 
+    groupBy = "Clusters",
+    trajectory = Treg_trajectory_skin, 
+    embedding = "UMAP", 
+    force = TRUE
+)
+
+proj = addTrajectory(
+    ArchRProj = proj, 
+    name = "Treg_trajectory_colon", 
+    groupBy = "Clusters",
+    trajectory = Treg_trajectory_colon, 
+    embedding = "UMAP", 
+    force = TRUE
+)
+
+# Exclude cells with NA values because these are not part of the trajectory
+proj$Treg_trajectory_VAT[!is.na(proj$Treg_trajectory_VAT)]
+proj$Treg_trajectory_skin[!is.na(proj$Treg_trajectory_skin)]
+proj$Treg_trajectory_colon[!is.na(proj$Treg_trajectory_colon)]
+
+# Save ArchRProject
+saveArchRProject(proj, 
+  outputDirectory= "ArchRProject_final", 
+  overwrite = TRUE,  
+  load = FALSE
+  )
+```
+
+```{r plot trajectory, message=FALSE, warning=FALSE, error=TRUE}
+# Plot trajectory
+# This overlays the pseudo-time values on our UMAP embedding and displays an 
+# arrow approximating the trajectory path from the spline-fit; cells that are 
+# not part of the trajectory are coloured in gray.
+Treg_trajectory_VAT_p = plotTrajectory(proj, 
+    trajectory = "Treg_trajectory_VAT", 
+    colorBy = "cellColData", 
+    name = "Treg_trajectory_VAT",
+    plotAs = "points"
+)
+
+Treg_trajectory_skin_p = plotTrajectory(proj, 
+    trajectory = "Treg_trajectory_skin", 
+    colorBy = "cellColData", 
+    name = "Treg_trajectory_skin",
+    plotAs = "points"
+)
+
+Treg_trajectory_colon_p = plotTrajectory(proj, 
+    trajectory = "Treg_trajectory_colon", 
+    colorBy = "cellColData", 
+    name = "Treg_trajectory_colon",
+    plotAs = "points"
+)
+
+ggAlignPlots(Treg_trajectory_VAT_p[[1]], Treg_trajectory_skin_p[[1]], Treg_trajectory_colon_p[[1]], type = "h")
+```
+
+```{r save trajectories, message=FALSE, warning=FALSE, echo=FALSE, error=TRUE}
+# Save plot as PDF
+plotPDF(Treg_trajectory_VAT_p, Treg_trajectory_skin_p, Treg_trajectory_colon_p,
+  name = "Plot-Treg_trajectory-UMAP.pdf", 
+  ArchRProj = proj, 
+  addDOC = FALSE, 
+  width = 5, 
+  height = 5
+)
+```
+
+### Pseudotime UMAPs
+```{r Treg pseudo-time UMAPs, message=FALSE, warning=FALSE, error=TRUE}
+# Overlay other features on the trajectory within our UMAP embedding
+# (display specific features only within the cells that are relevant to our 
+# trajectory)
+
+# Overlay genescores on Treg trajectory
+# Batf
+Treg_traj_VAT_p_Batf = plotTrajectory(proj, 
+  trajectory = "Treg_trajectory_VAT", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Batf", 
+  continuousSet = "horizonExtra",
+  plotAs = "points"
+)
+
+Treg_traj_skin_p_Batf = plotTrajectory(proj, 
+  trajectory = "Treg_trajectory_skin", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Batf", 
+  continuousSet = "horizonExtra",
+  plotAs = "points"
+)
+
+Treg_traj_colon_p_Batf = plotTrajectory(proj, 
+  trajectory = "Treg_trajectory_colon", 
+  colorBy = "GeneScoreMatrix", 
+  name = "Batf", 
+  continuousSet = "horizonExtra",
+  plotAs = "points"
+)
+
+# Overlay motif scores on Treg trajectory
+# Batf
+Treg_traj_VAT_p_Batf_motif = plotTrajectory(proj, 
+  trajectory = "Treg_trajectory_VAT", 
+  colorBy = "MotifMatrix", 
+  name = "z:Batf_790", 
+  continuousSet = "solarExtra",
+  plotAs = "points"
+)
+
+Treg_traj_skin_p_Batf_motif = plotTrajectory(proj, 
+  trajectory = "Treg_trajectory_skin", 
+  colorBy = "MotifMatrix", 
+  name = "z:Batf_790", 
+  continuousSet = "solarExtra",
+  plotAs = "points"
+)
+
+Treg_traj_colon_p_Batf_motif = plotTrajectory(proj, 
+  trajectory = "Treg_trajectory_colon", 
+  colorBy = "MotifMatrix", 
+  name = "z:Batf_790", 
+  continuousSet = "solarExtra",
+  plotAs = "points"
+)
+
+# Plot
+ggAlignPlots(Treg_trajectory_VAT_p[[1]], Treg_traj_VAT_p_Batf[[2]], type = "h", sizes = c(1,2))
+ggAlignPlots(Treg_trajectory_skin_p[[1]], Treg_traj_skin_p_Batf[[2]], type = "h", sizes = c(1,2))
+ggAlignPlots(Treg_trajectory_colon_p[[1]], Treg_traj_colon_p_Batf[[2]], type = "h", sizes = c(1,2))
+
+ggAlignPlots(Treg_trajectory_VAT_p[[1]], Treg_traj_VAT_p_Batf_motif[[2]], type = "h", sizes = c(1,2))
+ggAlignPlots(Treg_trajectory_skin_p[[1]], Treg_traj_skin_p_Batf_motif[[2]], type = "h", sizes = c(1,2))
+ggAlignPlots(Treg_trajectory_colon_p[[1]], Treg_traj_colon_p_Batf_motif[[2]], type = "h", sizes = c(1,2))
+```
+
+```{r save Treg trajectory UMAPs, message=FALSE, warning=FALSE, echo=FALSE, error=TRUE}
+# Save plots as PDF
+plotPDF(Treg_traj_VAT_p_Batf, Treg_traj_skin_p_Batf, Treg_traj_colon_p_Batf, Treg_traj_VAT_p_Batf_motif, Treg_traj_skin_p_Batf_motif, Treg_traj_colon_p_Batf_motif, 
+  name = "Plot-Treg_trajectory_genes-UMAP.pdf", 
+  ArchRProj = proj, 
+  addDOC = FALSE, 
+  width = 5, 
+  height = 5
+)
+```
+
+### Pseudo-Time Heatmaps
+```{r Treg pseudo-time heatmaps, message=FALSE, warning=FALSE, error=TRUE}
+# Visualize changes in features (MotifMatrix, GeneScoreMatrix) across 
+# pseudo-time using heatmaps. 
+# varCutOff (variance quantile cut-off) can be adjusted to set the top variable
+# features across the trajectory
+
+# Treg pseudotime MotifMatrix:
+Treg_trajMM = getTrajectory(ArchRProj = proj, 
+  name = "Treg_trajectory_VAT", 
+  useMatrix = "MotifMatrix", 
+  log2Norm = FALSE
+)
+
+# Plot:
+Treg_trajMM_p = plotTrajectoryHeatmap(Treg_trajMM, 
+  pal = paletteContinuous(set = "solarExtra"),
+  varCutOff = 0.96
+) 
+Treg_trajMM_p
+
+
+# Treg pseudotime GeneScoreMatrix:
+Treg_trajGSM = getTrajectory(ArchRProj = proj, 
+  name = "Treg_trajectory_VAT", 
+  useMatrix = "GeneScoreMatrix", 
+  log2Norm = FALSE
+)
+
+# Plot:
+Treg_trajGSM_p = plotTrajectoryHeatmap(Treg_trajGSM, 
+  pal = paletteContinuous(set = "horizonExtra"),
+  varCutOff = 0.9985
+) 
+Treg_trajGSM_p 
+```
+
+```{r save Treg trajectory heatmaps, message=FALSE, warning=FALSE, echo=FALSE, error=TRUE}
+# Save:
+plotPDF(Treg_trajMM_p, Treg_trajGSM_p, 
+  name = "Plot-Treg_VAT_trajectory_heatmap.pdf", 
+  ArchRProj = proj, 
+  addDOC = FALSE, 
+  width = 5, 
+  height = 5
+)
+```
+
+```{r save ArchRProject proj, message=FALSE, warning=FALSE, echo=FALSE, eval=FALSE}
+saveArchRProject(proj, 
+  outputDirectory= "ArchRProject_final", 
+  overwrite = TRUE,  
+  load = FALSE
+  )
+```
+
+```{r session info}
+sessionInfo()
+```
